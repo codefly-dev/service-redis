@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Service.Unique.DNSCase }}
+  namespace: {{ .Service.Namespace }}
+spec:
+  serviceName: {{ .Service.Unique.DNSCase }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Service.Unique.DNSCase }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Service.Unique.DNSCase }}
+    spec:
+      containers:
+        - name: redis
+          image: redis:6.0
+          command: ["redis-server", "/conf/redis.conf"]
+          volumeMounts:
+            - name: conf
+              mountPath: /conf
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: conf
+          configMap:
+            name: {{ .Service.Unique.DNSCase}}-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
