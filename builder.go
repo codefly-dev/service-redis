@@ -99,7 +99,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Wool.Focus("init", wool.Field("endpoints proposed", configurations.MakeNetworkMappingSummary(req.ProposedNetworkMappings)))
+	s.Wool.Debug("init", wool.Field("endpoints proposed", configurations.MakeNetworkMappingSummary(req.ProposedNetworkMappings)))
 
 	// Get the write mapping
 	writeMapping := configurations.FindMapping(req.ProposedNetworkMappings, s.write)

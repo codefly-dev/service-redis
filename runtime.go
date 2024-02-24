@@ -58,7 +58,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Focus("initializing", wool.Field("networkMappings", configurations.MakeNetworkMappingSummary(req.ProposedNetworkMappings)))
+	s.Wool.Debug("initializing", wool.Field("networkMappings", configurations.MakeNetworkMappingSummary(req.ProposedNetworkMappings)))
 
 	// Get the write mapping
 	writeMapping := configurations.FindMapping(req.ProposedNetworkMappings, s.write)
