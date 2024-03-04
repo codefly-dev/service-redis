@@ -165,24 +165,22 @@ type DeploymentParameter struct {
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
-	env := configurations.EnvironmentFromProto(req.Environment)
-	base := s.Builder.CreateDeploymentBase(env)
+	base := s.Builder.CreateDeploymentBase(req.Environment, req.BuildContext)
 
 	params := DeploymentParameter{
-		Image:       s.DockerImage(),
+		Image:       image,
 		Information: s.Information,
 		Deployment:  Deployment{Replicas: s.Settings.Replicas},
 	}
 
-	for _, kind := range req.Deployments {
-		switch v := kind.Deployment.(type) {
-		case *builderv0.Deployment_Kustomize:
-			err := s.deployKustomize(ctx, v, base, params)
-			if err != nil {
-				return nil, err
-			}
+	switch v := req.Deployment.Kind.(type) {
+	case *builderv0.Deployment_Kustomize:
+		err := s.deployKustomize(ctx, v, base, params)
+		if err != nil {
+			return nil, err
 		}
 	}
+
 	return s.Builder.DeployResponse()
 }
 
