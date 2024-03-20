@@ -58,44 +58,6 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	return s.Builder.LoadResponse(gettingStarted)
 }
 
-const Replicas = "replicas"
-
-func (s *Builder) createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(
-		communicate.NewIntInput(&agentv0.Message{Name: Replicas, Message: "Read replicas?", Description: "Split write and reads"}, 1),
-	)
-}
-
-type create struct {
-	DatabaseName string
-	TableName    string
-}
-
-func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
-	defer s.Wool.Catch()
-
-	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
-	if err != nil {
-		return s.Builder.CreateError(err)
-	}
-
-	s.Settings.Replicas, err = session.GetIntString(Replicas)
-	if err != nil {
-		return s.Builder.CreateError(err)
-	}
-
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
-	}
-
-	err = s.Templates(ctx, create{}, services.WithBuilder(builderFS))
-	if err != nil {
-		return s.Base.Builder.CreateError(err)
-	}
-
-	return s.Base.Builder.CreateResponse(ctx, s.Settings)
-}
-
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
@@ -123,7 +85,7 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 
 	s.DependencyEndpoints = req.DependenciesEndpoints
 
-	return s.Builder.InitResponse(s.NetworkMappings, configurations.Unknown)
+	return s.Builder.InitResponse(s.NetworkMappings, nil)
 }
 
 func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
@@ -197,6 +159,44 @@ func (s *Builder) deployKustomize(ctx context.Context, v *builderv0.Deployment_K
 		}
 	}
 	return nil
+}
+
+const Replicas = "replicas"
+
+func (s *Builder) createCommunicate() *communicate.Sequence {
+	return communicate.NewSequence(
+		communicate.NewIntInput(&agentv0.Message{Name: Replicas, Message: "Read replicas?", Description: "Split write and reads"}, 1),
+	)
+}
+
+type create struct {
+	DatabaseName string
+	TableName    string
+}
+
+func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
+	defer s.Wool.Catch()
+
+	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
+
+	s.Settings.Replicas, err = session.GetIntString(Replicas)
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
+
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
+	}
+
+	err = s.Templates(ctx, create{}, services.WithBuilder(builderFS))
+	if err != nil {
+		return s.Base.Builder.CreateError(err)
+	}
+
+	return s.Base.Builder.CreateResponse(ctx, s.Settings)
 }
 
 //go:embed templates/factory

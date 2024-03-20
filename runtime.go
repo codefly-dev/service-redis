@@ -87,7 +87,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
 	runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
 	if s.Settings.Silent {
-		runner.Silence()
+		runner.WithSilence()
 	}
 
 	err = runner.Init(ctx, image)
@@ -137,7 +137,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			out := agents.NewServiceProvider(ctx, identity).Get(ctx)
 			replica.WithOut(out)
 			if s.Settings.Silent {
-				replica.Silence()
+				replica.WithSilence()
 			}
 
 			err = replica.Init(ctx, image)
