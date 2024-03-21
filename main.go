@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/templates"
@@ -27,9 +28,10 @@ var requirements = builders.NewDependencies(agent.Name,
 type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
 
-	Watch    bool `yaml:"watch"`
-	Silent   bool `yaml:"silent"`
-	Replicas int  `yaml:"replicas"`
+	Watch       bool `yaml:"watch"`
+	Silent      bool `yaml:"silent"`
+	ReadReplica bool `yaml:"read-replica"`
+	Persist     bool `yaml:"persist"`
 }
 
 var image = &configurations.DockerImage{Name: "redis", Tag: "latest"}
@@ -60,7 +62,16 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 			{Type: agentv0.Capability_RUNTIME},
 		},
 		Protocols: []*agentv0.Protocol{},
-		ReadMe:    readme,
+		ProviderInfos: []*agentv0.ProviderInfoDetail{
+			{
+				Name: "redis", Description: "connection string",
+				Fields: []*agentv0.ProviderInfoField{
+					{Name: "write", Description: "connection string for write endpoint"},
+					{Name: "read", Description: "connection string for read endpoint"},
+				},
+			},
+		},
+		ReadMe: readme,
 	}, nil
 }
 
@@ -73,26 +84,31 @@ func NewService() *Service {
 
 func (s *Service) LoadEndpoints(ctx context.Context) error {
 	// Create the write endpoint
-	write := &configurations.Endpoint{Name: "write", Visibility: configurations.VisibilityApplication}
-	write.Application = s.Configuration.Application
-	write.Service = s.Configuration.Name
+	write := s.Configuration.BaseEndpoint("write")
 	var err error
 	s.write, err = configurations.NewTCPAPI(ctx, write)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot  create write endpoint")
 	}
 	s.Endpoints = []*basev0.Endpoint{s.write}
-	// Create the write endpoint
-	read := &configurations.Endpoint{Name: "read", Visibility: configurations.VisibilityApplication}
-	read.Application = s.Configuration.Application
-	read.Service = s.Configuration.Name
+
+	// Create the read endpoint
+	read := s.Configuration.BaseEndpoint("read")
 	s.read, err = configurations.NewTCPAPI(ctx, read)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot  create read endpoint")
 	}
-	s.read.Replicas = int32(s.Replicas)
 	s.Endpoints = append(s.Endpoints, s.read)
 	return nil
+}
+
+func (s *Service) CreateConnectionString(ctx context.Context, address string) string {
+	password, _ := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "redis", "REDIS_PASSWORD")
+	if password == "" {
+		return fmt.Sprintf("redis://%s", address)
+	} else {
+		return fmt.Sprintf("redis://:%s@%s", password, address)
+	}
 }
 
 func main() {
