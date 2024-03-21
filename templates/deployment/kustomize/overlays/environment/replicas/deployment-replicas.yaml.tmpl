@@ -1,7 +1,30 @@
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
-  name: {{ .Service.Name.DNSCase }}
+  name: "{{ .Service.Name.DNSCase }}-read"
   namespace: "{{ .Namespace }}"
 spec:
-  replicas: 2 # Number of replicas
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "{{ .Service.Name.DNSCase }}-read"
+  template:
+    metadata:
+      labels:
+        app: "{{ .Service.Name.DNSCase }}-read"
+    spec:
+      containers:
+        - name: redis
+          image: redis:alpine
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/redis/redis.conf
+              subPath: redis.conf
+          command: [ "redis-server", "/usr/local/etc/redis/redis.conf", "--slaveof", "{{ .Service.Name.DNSCase }}-write", "7070" ]
+
+      volumes:
+        - name: config
+          configMap:
+            name: "{{ .Service.Name.DNSCase }}-config"
