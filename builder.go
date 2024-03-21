@@ -7,6 +7,7 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	"github.com/codefly-dev/core/wool"
+	"path"
 
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/configurations"
@@ -57,6 +58,8 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
+
+	ctx = s.Wool.Inject(ctx)
 
 	s.Wool.Debug("init", wool.Field("endpoints proposed", configurations.MakeNetworkMappingSummary(req.ProposedNetworkMappings)))
 
@@ -113,37 +116,32 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
-
+	base := s.Builder.CreateDeploymentBase(req.Environment, req.Deployment.Namespace, req.BuildContext)
 	params := services.DeploymentTemplateInput{
 		Image:       image,
 		Information: s.Information,
-		DeploymentConfiguration: services.DeploymentConfiguration{
-			Replicas: 1,
-		},
 	}
-
-	err := s.Builder.Deploy(ctx, req, deploymentFS, params)
-	if err != nil {
-		return s.Builder.DeployError(err)
+	switch v := req.Deployment.Kind.(type) {
+	case *builderv0.Deployment_Kustomize:
+		err := s.deployKustomize(ctx, v, base, params)
+		if err != nil {
+			return s.Builder.DeployError(err)
+		}
 	}
-
 	return s.Builder.DeployResponse()
 }
 
-//func (s *Builder) deployKustomize(ctx context.Context, v *builderv0.Deployment_Kustomize, base *services.DeploymentBase, params any) error {
-//
-//	if s.Settings.Replicas == 0 {
-//		wrapper := &services.DeploymentWrapper{DeploymentBase: base, Parameters: params}
-//		destination := path.Join(v.Kustomize.Destination, s.Configuration.Unique())
-//		err := s.Templates(ctx, wrapper,
-//			services.WithDeployment(deploymentFS, "kustomize/base").WithDestination(path.Join(destination, "base")),
-//			services.WithDeployment(deploymentFS, "kustomize/overlays/environment/main").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
-//		if err != nil {
-//			return err
-//		}
-//	}
-//	return nil
-//}
+func (s *Builder) deployKustomize(ctx context.Context, v *builderv0.Deployment_Kustomize, base *services.DeploymentBase, params any) error {
+	wrapper := &services.DeploymentWrapper{DeploymentBase: base, Parameters: params}
+	destination := path.Join(v.Kustomize.Destination, "applications", s.Configuration.Application, "services", s.Configuration.Name)
+	err := s.Templates(ctx, wrapper,
+		services.WithDeployment(deploymentFS, "kustomize/base").WithDestination(path.Join(destination, "base")),
+		services.WithDeployment(deploymentFS, "kustomize/overlays/environment/write").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
 const ReadReplica = "read-replica"
 

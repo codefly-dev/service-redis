@@ -5,5 +5,7 @@ metadata:
   namespace: "{{ .Namespace }}"
 data:
   redis.conf: |
-    appendonly yes
-    replica-read-only yes
+    # Redis configuration file
+    bind 0.0.0.0
+    protected-mode no
+    # Other configurations

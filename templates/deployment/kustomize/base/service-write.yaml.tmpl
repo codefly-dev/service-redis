@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Service.Name.DNSCase }}
+  name: "{{ .Service.Name.DNSCase }}-write"
   namespace: "{{ .Namespace }}"
 spec:
   selector:
-    app: {{ .Service.Unique.DNSCase}}
+    app: "{{ .Service.Unique.DNSCase}}-write"
   ports:
     - protocol: TCP
       name: tcp-port

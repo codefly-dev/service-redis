@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "{{ .Service.Name.DNSCase }}-write"
+  namespace: "{{ .Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "{{ .Service.Name.DNSCase }}-write"
+      role: master
+  template:
+    metadata:
+      labels:
+        app: "{{ .Service.Name.DNSCase }}-write"
+        role: master
+    spec:
+      containers:
+        - name: redis
+          image: redis:alpine
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/redis/redis.conf
+              subPath: redis.conf
+          command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+      volumes:
+        - name: config
+          configMap:
+            name: "{{ .Service.Name.DNSCase }}-write-config"
