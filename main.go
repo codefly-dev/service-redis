@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"embed"
-	"fmt"
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/templates"
@@ -54,18 +53,16 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	}
 
 	return &agentv0.AgentInformation{
-		RuntimeRequirements: []*agentv0.Runtime{
-			{Type: agentv0.Runtime_DOCKER},
-		},
+		RuntimeRequirements: []*agentv0.Runtime{},
 		Capabilities: []*agentv0.Capability{
 			{Type: agentv0.Capability_BUILDER},
 			{Type: agentv0.Capability_RUNTIME},
 		},
 		Protocols: []*agentv0.Protocol{},
-		ProviderInfos: []*agentv0.ProviderInfoDetail{
+		ConfigurationDetails: []*agentv0.ConfigurationValueDetail{
 			{
-				Name: "redis", Description: "connection string",
-				Fields: []*agentv0.ProviderInfoField{
+				Name: "connection", Description: "connection string",
+				Fields: []*agentv0.ConfigurationValueInformation{
 					{Name: "write", Description: "connection string for write endpoint"},
 					{Name: "read", Description: "connection string for read endpoint"},
 				},
@@ -82,34 +79,14 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) LoadEndpoints(ctx context.Context) error {
-	// Create the write endpoint
-	write := s.Configuration.BaseEndpoint("write")
-	var err error
-	s.write, err = configurations.NewTCPAPI(ctx, write)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot  create write endpoint")
-	}
-	s.Endpoints = []*basev0.Endpoint{s.write}
-
-	// Create the read endpoint
-	read := s.Configuration.BaseEndpoint("read")
-	s.read, err = configurations.NewTCPAPI(ctx, read)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot  create read endpoint")
-	}
-	s.Endpoints = append(s.Endpoints, s.read)
-	return nil
-}
-
-func (s *Service) CreateConnectionString(ctx context.Context, address string) string {
-	password, _ := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "redis", "REDIS_PASSWORD")
-	if password == "" {
-		return fmt.Sprintf("redis://%s", address)
-	} else {
-		return fmt.Sprintf("redis://:%s@%s", password, address)
-	}
-}
+//func (s *Service) CreateConnectionConfiguration(ctx context.Context, address string) string {
+//	password, _ := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "redis", "REDIS_PASSWORD")
+//	if password == "" {
+//		return fmt.Sprintf("redis://%s", address)
+//	} else {
+//		return fmt.Sprintf("redis://:%s@%s", password, address)
+//	}
+//}
 
 func main() {
 	agents.Register(

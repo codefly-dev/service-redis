@@ -19,8 +19,8 @@ type Runtime struct {
 	*Service
 
 	// internal
-	runners []*runners.Docker
-	port    int32
+	runners   []runners.Runner
+	redisPort uint16
 }
 
 func NewRuntime() *Runtime {
@@ -33,6 +33,12 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	if req.Scope != basev0.RuntimeScope_Container {
+		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
+	}
+
+	s.Runtime.Scope = req.Scope
+
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
@@ -40,44 +46,77 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 
 	requirements.Localize(s.Location)
 
-	err = s.LoadEndpoints(ctx)
+	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
+	s.write, err = configurations.FindTCPEndpointWithName(ctx, "write", s.Endpoints)
+	if err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
+
+	s.read, err = configurations.FindTCPEndpointWithName(ctx, "read", s.Endpoints)
+	if err != nil {
+		return s.Base.Runtime.LoadError(err)
+
+	}
+
+	s.EnvironmentVariables.SetEnvironment(req.Environment)
+	s.EnvironmentVariables.SetRuntimeScope(req.Scope)
 
 	return s.Base.Runtime.LoadResponse()
+}
+
+func (s *Runtime) CreateConnectionConfiguration(ctx context.Context, endpoint *basev0.Endpoint, instance *basev0.NetworkInstance) (*basev0.Configuration, error) {
+
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	connection := fmt.Sprintf("redis://%s:%d", instance.Host, instance.Port)
+
+	conf := &basev0.Configuration{
+		Origin: s.Base.Service.Unique(),
+		Scope:  instance.Scope,
+		Configurations: []*basev0.ConfigurationInformation{
+			{Name: endpoint.Name,
+				ConfigurationValues: []*basev0.ConfigurationValue{
+					{Key: "connection", Value: connection, Secret: true},
+				},
+			},
+		},
+	}
+	return conf, nil
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Debug("initializing", wool.Field("networkMappings", configurations.MakeNetworkMappingSummary(req.ProposedNetworkMappings)))
+	s.Runtime.LogInitRequest(req)
 
-	// Get the write mapping
-	writeMapping, err := configurations.FindNetworkMapping(s.write, req.ProposedNetworkMappings)
+	writeMapping, err := configurations.FindNetworkMapping(req.ProposedNetworkMappings, s.write)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	for _, providerInfo := range req.ProviderInfos {
-		s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(providerInfo)...)
+	writeInstance, err := s.Runtime.NetworkInstance(req.ProposedNetworkMappings, s.write)
+	if err != nil {
+		return s.Runtime.InitError(err)
 	}
 
-	// Docker
-	s.port = 6379
+	s.LogForward("write endpoint will run on localhost:%d", writeInstance.Port)
+
+	s.redisPort = 6379
 
 	// runner for the write endpoint
-	runner, err := runners.NewDocker(ctx)
+	runner, err := runners.NewDocker(ctx, image)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
 	runner.WithCommand("redis-server")
-	runner.WithPort(runners.DockerPortMapping{Container: s.port, Host: writeMapping.Port})
-	runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
+	runner.WithPort(runners.DockerPortMapping{Container: s.redisPort, Host: uint16(writeInstance.Port)})
 	runner.WithName(s.Global())
 
 	if s.Settings.Persist {
@@ -88,14 +127,19 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		runner.WithSilence()
 	}
 
-	err = runner.Init(ctx, image)
+	err = runner.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.runners = []*runners.Docker{runner}
+	s.runners = []runners.Runner{runner}
 
-	readMapping, err := configurations.FindNetworkMapping(s.read, req.ProposedNetworkMappings)
+	readMapping, err := configurations.FindNetworkMapping(req.ProposedNetworkMappings, s.read)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+
+	readInstance, err := s.Runtime.NetworkInstance(req.ProposedNetworkMappings, s.read)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -103,25 +147,21 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if !s.Settings.ReadReplica {
 		// Point to the write
 		readMapping = &basev0.NetworkMapping{
-			Endpoint: s.read,
-			Host:     writeMapping.Host,
-			Port:     writeMapping.Port,
-			Address:  writeMapping.Address,
+			Endpoint:  s.read,
+			Instances: writeMapping.Instances,
 		}
+		s.LogForward("read endpoint will run on localhost:%d", writeInstance.Port)
+
 	} else {
-		s.NetworkMappings = req.ProposedNetworkMappings
 		// Use the instances
-		write := configurations.LocalizeMapping(writeMapping, "host.docker.internal")
-		// runner for the write endpoint
-		replicaRunner, err := runners.NewDocker(ctx)
+		replicaRunner, err := runners.NewDocker(ctx, image)
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
 
-		s.Wool.Focus("replicaRunner", wool.Field("port", write.Port), wool.Field("host", write.Host))
-		replicaRunner.WithCommand("redis-server", "--replicaof", write.Host, fmt.Sprintf("%d", write.Port))
-		replicaRunner.WithPort(runners.DockerPortMapping{Container: s.port, Host: readMapping.Port})
-		replicaRunner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
+		s.Wool.Focus("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Host))
+		replicaRunner.WithCommand("redis-server", "--replicaof", writeInstance.Host, fmt.Sprintf("%d", writeInstance.Port))
+		replicaRunner.WithPort(runners.DockerPortMapping{Container: s.redisPort, Host: uint16(readInstance.Port)})
 		replicaRunner.WithName(fmt.Sprintf("%s-read", s.Global()))
 		if s.Settings.Persist {
 			replicaRunner.WithPersistence()
@@ -135,9 +175,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		if s.Settings.Silent {
 			replicaRunner.WithSilence()
 		}
-		s.LogForward("read endpoint will run on: %s", readMapping.Address)
+		s.LogForward("read endpoint will run on localhost:%d", readInstance.Port)
 
-		err = replicaRunner.Init(ctx, image)
+		err = replicaRunner.Init(ctx)
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
@@ -147,18 +187,21 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = []*basev0.NetworkMapping{writeMapping, readMapping}
 
-	s.LogForward("write endpoint, will run on: %s", writeMapping.Address)
-	s.LogForward("read endpoint, will run on: %s", readMapping.Address)
-
-	connections := &basev0.ProviderInformation{
-		Name: "redis", Origin: s.Service.Configuration.Unique(),
-		Data: map[string]string{
-			"read":  s.CreateConnectionString(ctx, readMapping.Address),
-			"write": s.CreateConnectionString(ctx, writeMapping.Address),
-		},
+	// Create connection string configurations for the network instance
+	for _, inst := range writeMapping.Instances {
+		conf, err := s.CreateConnectionConfiguration(ctx, s.write, inst)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+		s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
 	}
-
-	s.ServiceProviderInfos = []*basev0.ProviderInformation{connections}
+	for _, inst := range readMapping.Instances {
+		conf, err := s.CreateConnectionConfiguration(ctx, s.read, inst)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+		s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
+	}
 
 	return s.Base.Runtime.InitResponse()
 }
