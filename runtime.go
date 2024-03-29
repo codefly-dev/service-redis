@@ -33,7 +33,8 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	if req.Scope != basev0.RuntimeScope_Container {
+	s.Runtime.SetScope(req)
+	if !s.Runtime.Container() {
 		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
 	}
 
