@@ -64,7 +64,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	}
 
 	s.EnvironmentVariables.SetEnvironment(req.Environment)
-	s.EnvironmentVariables.SetRuntimeScope(req.Scope)
+	s.EnvironmentVariables.SetNetworkScope(req.Scope)
 
 	return s.Base.Runtime.LoadResponse()
 }
@@ -96,12 +96,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Runtime.LogInitRequest(req)
 
-	writeMapping, err := configurations.FindNetworkMapping(req.ProposedNetworkMappings, s.write)
+	writeMapping, err := configurations.FindNetworkMapping(ctx, req.ProposedNetworkMappings, s.write)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	writeInstance, err := s.Runtime.NetworkInstance(req.ProposedNetworkMappings, s.write)
+	writeInstance, err := s.Runtime.NetworkInstance(ctx, req.ProposedNetworkMappings, s.write)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -135,12 +135,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.runners = []runners.Runner{runner}
 
-	readMapping, err := configurations.FindNetworkMapping(req.ProposedNetworkMappings, s.read)
+	readMapping, err := configurations.FindNetworkMapping(ctx, req.ProposedNetworkMappings, s.read)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	readInstance, err := s.Runtime.NetworkInstance(req.ProposedNetworkMappings, s.read)
+	readInstance, err := s.Runtime.NetworkInstance(ctx, req.ProposedNetworkMappings, s.read)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -160,7 +160,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			return s.Runtime.InitError(err)
 		}
 
-		s.Wool.Focus("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Host))
+		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Host))
 		replicaRunner.WithCommand("redis-server", "--replicaof", writeInstance.Host, fmt.Sprintf("%d", writeInstance.Port))
 		replicaRunner.WithPort(runners.DockerPortMapping{Container: s.redisPort, Host: uint16(readInstance.Port)})
 		replicaRunner.WithName(fmt.Sprintf("%s-read", s.Global()))
@@ -194,14 +194,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
-		s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
+		s.Runtime.ExportedConfigurations = append(s.Runtime.ExportedConfigurations, conf)
 	}
 	for _, inst := range readMapping.Instances {
 		conf, err := s.CreateConnectionConfiguration(ctx, s.read, inst)
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
-		s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
+		s.Runtime.ExportedConfigurations = append(s.Runtime.ExportedConfigurations, conf)
 	}
 
 	return s.Base.Runtime.InitResponse()
