@@ -87,7 +87,13 @@ type Parameters struct {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	namespace := req.Deployment.Namespace
+	var k *builderv0.KubernetesDeployment
+	var err error
+	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	namespace := k.Namespace
 	readService := fmt.Sprintf("redis://read-%s.%s.svc.cluster.local:6379", s.Base.Service.Name, namespace)
 	writeService := fmt.Sprintf("redis://write-%s.%s.svc.cluster.local:6379", s.Base.Service.Name, namespace)
 
@@ -110,7 +116,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		},
 	}
 
-	err := s.EnvironmentVariables.AddConfigurations(conf)
+	err = s.EnvironmentVariables.AddConfigurations(conf)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
@@ -138,21 +144,18 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		Parameters: Parameters{ReadSelector: readSelector},
 	}
 
-	base := s.Builder.CreateDeploymentBase(req.Environment, req.Deployment.Namespace, req.BuildContext)
+	base := s.Builder.CreateKubernetesBase(req.Environment, k.Namespace, k.BuildContext)
+	err = s.deployKustomize(ctx, k, base, params)
 
-	switch v := req.Deployment.Kind.(type) {
-	case *builderv0.Deployment_Kustomize:
-		err := s.deployKustomize(ctx, v, base, params)
-		if err != nil {
-			return s.Builder.DeployError(err)
-		}
+	if err != nil {
+		return s.Builder.DeployError(err)
 	}
 	return s.Builder.DeployResponse()
 }
 
-func (s *Builder) deployKustomize(ctx context.Context, v *builderv0.Deployment_Kustomize, base *services.DeploymentBase, params any) error {
+func (s *Builder) deployKustomize(ctx context.Context, k *builderv0.KubernetesDeployment, base *services.DeploymentBase, params any) error {
 	wrapper := &services.DeploymentWrapper{DeploymentBase: base, Parameters: params}
-	destination := path.Join(v.Kustomize.Destination, "applications", s.Base.Service.Application, "services", s.Base.Service.Name)
+	destination := path.Join(k.Destination, "applications", s.Base.Service.Application, "services", s.Base.Service.Name)
 	err := s.Templates(ctx, wrapper,
 		services.WithDeployment(deploymentFS, "kustomize/base").WithDestination(path.Join(destination, "base")),
 		services.WithDeployment(deploymentFS, "kustomize/overlays/environment/write").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
