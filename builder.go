@@ -11,7 +11,6 @@ import (
 	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
-	"path"
 )
 
 type Builder struct {
@@ -77,11 +76,12 @@ func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builde
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 
-	return &builderv0.BuildResponse{}, nil
+	return s.Builder.BuildResponse()
 }
 
 type Parameters struct {
 	ReadSelector string
+	ReadReplica  bool
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
@@ -141,35 +141,15 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	params := services.DeploymentParameters{
 		ConfigMap:  cm,
 		SecretMap:  secrets,
-		Parameters: Parameters{ReadSelector: readSelector},
+		Parameters: Parameters{ReadSelector: readSelector, ReadReplica: s.Settings.ReadReplica},
 	}
 
-	base := s.Builder.CreateKubernetesBase(req.Environment, k.Namespace, k.BuildContext)
-	err = s.deployKustomize(ctx, k, base, params)
-
+	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
+
 	return s.Builder.DeployResponse()
-}
-
-func (s *Builder) deployKustomize(ctx context.Context, k *builderv0.KubernetesDeployment, base *services.DeploymentBase, params any) error {
-	wrapper := &services.DeploymentWrapper{DeploymentBase: base, Parameters: params}
-	destination := path.Join(k.Destination, "applications", s.Base.Service.Application, "services", s.Base.Service.Name)
-	err := s.Templates(ctx, wrapper,
-		services.WithDeployment(deploymentFS, "kustomize/base").WithDestination(path.Join(destination, "base")),
-		services.WithDeployment(deploymentFS, "kustomize/overlays/environment/write").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
-	if err != nil {
-		return err
-	}
-
-	if s.Settings.ReadReplica {
-		err := s.Templates(ctx, wrapper, services.WithDeployment(deploymentFS, "kustomize/overlays/environment/replicas").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 const ReadReplica = "read-replica"
