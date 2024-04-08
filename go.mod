@@ -3,10 +3,12 @@ module github.com/codefly-dev/service-krakend
 go 1.22.0
 
 require (
-	github.com/codefly-dev/core v0.1.77
+	github.com/codefly-dev/core v0.1.78
 	github.com/golang-migrate/migrate/v4 v4.17.0
+	github.com/hashicorp/go-plugin v1.6.0
 	github.com/lib/pq v1.10.9
-	google.golang.org/grpc v1.63.0
+	github.com/stretchr/testify v1.9.0
+	google.golang.org/grpc v1.63.2
 )
 
 require (
@@ -19,6 +21,7 @@ require (
 	github.com/bufbuild/protovalidate-go v0.6.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.2.1 // indirect
 	github.com/cheggaaa/pb/v3 v3.1.5 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/docker v26.0.0+incompatible // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
@@ -48,10 +51,9 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
-	github.com/hashicorp/go-plugin v1.6.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
-	github.com/lufia/plan9stats v0.0.0-20240226150601-1dcf7310316a // indirect
+	github.com/lufia/plan9stats v0.0.0-20240408141607-282e7b5d6b74 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -67,6 +69,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.0 // indirect
 	github.com/pierrec/lz4 v2.6.1+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/shirou/gopsutil/v3 v3.24.3 // indirect
