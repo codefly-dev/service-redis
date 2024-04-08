@@ -34,11 +34,6 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
-	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
-
 	s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
 	if err != nil {
 		return nil, err
@@ -46,6 +41,15 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	// communication on CreateResponse
 	err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
+	if err != nil {
+		return s.Builder.LoadError(err)
+	}
+
+	if req.AtCreate {
+		return s.Builder.LoadResponse()
+	}
+
+	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
