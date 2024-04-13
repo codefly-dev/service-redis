@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/configurations/standards"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
@@ -182,16 +184,40 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		return s.Builder.CreateError(err)
 	}
 
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
-	}
-
 	err = s.Templates(ctx, create{}, services.WithBuilder(builderFS))
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
 	}
 
+	err = s.CreateEndpoints(ctx)
+	if err != nil {
+		return s.Base.Builder.CreateError(err)
+
+	}
+
 	return s.Base.Builder.CreateResponse(ctx, s.Settings)
+}
+
+func (s *Builder) CreateEndpoints(ctx context.Context) error {
+
+	write := s.Base.Service.BaseEndpoint(standards.TCP)
+	write.Name = "write"
+	tcp, err := configurations.LoadTCPAPI(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot load TCP api")
+	}
+	s.write, err = configurations.NewAPI(ctx, write, configurations.ToTCPAPI(tcp))
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
+	}
+	read := s.Base.Service.BaseEndpoint(standards.TCP)
+	read.Name = "read"
+	s.read, err = configurations.NewAPI(ctx, read, configurations.ToTCPAPI(tcp))
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
+	}
+	s.Endpoints = []*basev0.Endpoint{s.write, s.read}
+	return nil
 }
 
 //go:embed templates/factory

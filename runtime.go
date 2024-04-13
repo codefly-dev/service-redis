@@ -74,7 +74,7 @@ func (s *Runtime) CreateConnectionConfiguration(ctx context.Context, endpoint *b
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	connection := fmt.Sprintf("redis://%s:%d", instance.Host, instance.Port)
+	connection := fmt.Sprintf("redis://%s:%d", instance.Hostname, instance.Port)
 
 	conf := &basev0.Configuration{
 		Origin: s.Base.Service.Unique(),
@@ -160,8 +160,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			return s.Runtime.InitError(err)
 		}
 
-		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Host))
-		replicaRunner.WithCommand("redis-server", "--replicaof", writeInstance.Host, fmt.Sprintf("%d", writeInstance.Port))
+		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Hostname))
+		replicaRunner.WithCommand("redis-server", "--replicaof", writeInstance.Hostname, fmt.Sprintf("%d", writeInstance.Port))
 		replicaRunner.WithPort(runners.DockerPortMapping{Container: s.redisPort, Host: uint16(readInstance.Port)})
 		replicaRunner.WithName(fmt.Sprintf("%s-read", s.Global()))
 		if s.Settings.Persist {
