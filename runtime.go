@@ -9,9 +9,10 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
-	"github.com/codefly-dev/core/runners"
+	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/wool"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/hashicorp/go-multierror"
 	_ "github.com/lib/pq"
 )
 
@@ -19,7 +20,7 @@ type Runtime struct {
 	*Service
 
 	// internal
-	runners   []runners.Runner
+	runners   []runners.RunnerEnvironment
 	redisPort uint16
 }
 
@@ -111,29 +112,20 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.redisPort = 6379
 
 	// runner for the write endpoint
-	runner, err := runners.NewDocker(ctx, image)
+	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithProject())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	runner.WithCommand("redis-server")
-	runner.WithPort(runners.DockerPortMapping{Container: s.redisPort, Host: uint16(writeInstance.Port)})
-	runner.WithName(s.Global())
-
-	if s.Settings.Persist {
-		runner.WithPersistence()
-	}
-
-	if s.Settings.Silent {
-		runner.WithSilence()
-	}
+	runner.WithPortMapping(ctx, uint16(writeInstance.Port), s.redisPort)
+	runner.WithOutput(s.Logger)
 
 	err = runner.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.runners = []runners.Runner{runner}
+	s.runners = []runners.RunnerEnvironment{runner}
 
 	readMapping, err := configurations.FindNetworkMapping(ctx, req.ProposedNetworkMappings, s.read)
 	if err != nil {
@@ -155,27 +147,21 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	} else {
 		// Use the instances
-		replicaRunner, err := runners.NewDocker(ctx, image)
+		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Hostname))
+		name := fmt.Sprintf("%s-read", s.UniqueWithProject())
+		replicaRunner, err := runners.NewDockerHeadlessEnvironment(ctx, image, name)
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
-
-		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstance.Port), wool.Field("host", writeInstance.Hostname))
 		replicaRunner.WithCommand("redis-server", "--replicaof", writeInstance.Hostname, fmt.Sprintf("%d", writeInstance.Port))
-		replicaRunner.WithPort(runners.DockerPortMapping{Container: s.redisPort, Host: uint16(readInstance.Port)})
-		replicaRunner.WithName(fmt.Sprintf("%s-read", s.Global()))
-		if s.Settings.Persist {
-			replicaRunner.WithPersistence()
-		}
+		replicaRunner.WithPortMapping(ctx, uint16(readInstance.Port), s.redisPort)
+		runner.WithOutput(s.Logger)
 
 		// Create a replicaRunner identity
 		identity := s.Identity.Clone()
 		identity.Name = fmt.Sprintf("%s-read", s.Identity.Name)
 		out := agents.NewServiceProvider(ctx, identity).Get(ctx)
-		replicaRunner.WithOut(out)
-		if s.Settings.Silent {
-			replicaRunner.WithSilence()
-		}
+		replicaRunner.WithOutput(out)
 		s.LogForward("read endpoint will run on localhost:%d", readInstance.Port)
 
 		err = replicaRunner.Init(ctx)
@@ -218,19 +204,6 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	runningContext := s.Wool.Inject(context.Background())
-
-	for _, runner := range s.runners {
-		err := runner.Start(runningContext)
-		if err != nil {
-			return s.Runtime.StartError(err)
-		}
-		err = s.WaitForReady(ctx)
-		if err != nil {
-			return s.Runtime.StartError(err)
-		}
-
-	}
 	return s.Runtime.StartResponse()
 }
 
@@ -240,17 +213,24 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
+	if s.Settings.Persist {
+		s.Wool.Debug("persisting service")
+		return s.Runtime.StopResponse()
+	}
 	s.Wool.Debug("stopping service")
+	var agg error
 	for _, runner := range s.runners {
-		err := runner.Stop()
+		err := runner.Stop(ctx)
 		if err != nil {
-			return s.Runtime.StopError(err)
+			agg = multierror.Append(agg, err)
 		}
-
 	}
 	err := s.Base.Stop()
 	if err != nil {
-		return s.Runtime.StopError(err)
+		agg = multierror.Append(agg, err)
+	}
+	if agg != nil {
+		return s.Base.Runtime.StopError(agg)
 	}
 	return s.Runtime.StopResponse()
 }
