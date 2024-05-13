@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/configurations"
-	"github.com/codefly-dev/core/configurations/standards"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/templates"
 )
 
@@ -36,18 +36,19 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
-	s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
-	if err != nil {
-		return nil, err
-	}
-
-	// communication on CreateResponse
-	err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
-
-	if req.AtCreate {
+	if req.CreationMode != nil {
+		s.Builder.CreationMode = req.CreationMode
+		s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
+		if err != nil {
+			return nil, err
+		}
+		if req.CreationMode.Communicate {
+			// communication on CreateResponse
+			err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
+			if err != nil {
+				return s.Builder.LoadError(err)
+			}
+		}
 		return s.Builder.LoadResponse()
 	}
 
@@ -105,7 +106,6 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	conf := &basev0.Configuration{
 		Origin: s.Base.Service.Unique(),
-		Scope:  basev0.NetworkScope_Container,
 		Configurations: []*basev0.ConfigurationInformation{
 			{
 				Name: "read",
@@ -140,14 +140,14 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 
 	readSelector := "read"
-	if !s.Settings.ReadReplica {
+	if !s.Settings.WithReadReplicas {
 		readSelector = "write"
 	}
 
 	params := services.DeploymentParameters{
 		ConfigMap:  cm,
 		SecretMap:  secrets,
-		Parameters: Parameters{ReadSelector: readSelector, ReadReplica: s.Settings.ReadReplica},
+		Parameters: Parameters{ReadSelector: readSelector, ReadReplica: s.Settings.WithReadReplicas},
 	}
 
 	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
@@ -158,12 +158,14 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	return s.Builder.DeployResponse()
 }
 
-const ReadReplica = "read-replica"
+func (s *Builder) Options() []*agentv0.Question {
+	return []*agentv0.Question{
+		communicate.NewConfirm(&agentv0.Message{Name: WithReadReplicas, Message: "Read replicas?", Description: "Split write and reads"}, true),
+	}
+}
 
 func (s *Builder) createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(
-		communicate.NewConfirm(&agentv0.Message{Name: ReadReplica, Message: "Read replicas?", Description: "Split write and reads"}, true),
-	)
+	return communicate.NewSequence(s.Options()...)
 }
 
 type create struct {
@@ -173,46 +175,55 @@ type create struct {
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
+	if s.Builder.CreationMode.Communicate {
+		s.Wool.Debug("using communicate mode")
 
-	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
+		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+
+		s.Settings.WithReadReplicas, err = session.Confirm(WithReadReplicas)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+
+	} else {
+		options := s.Options()
+		var err error
+		s.Settings.WithReadReplicas, err = communicate.GetDefaultConfirm(options, WithReadReplicas)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+	}
+	err := s.Templates(ctx, create{}, services.WithBuilder(builderFS))
 	if err != nil {
 		return s.Builder.CreateError(err)
-	}
-
-	s.Settings.ReadReplica, err = session.Confirm(ReadReplica)
-	if err != nil {
-		return s.Builder.CreateError(err)
-	}
-
-	err = s.Templates(ctx, create{}, services.WithBuilder(builderFS))
-	if err != nil {
-		return s.Base.Builder.CreateError(err)
 	}
 
 	err = s.CreateEndpoints(ctx)
 	if err != nil {
-		return s.Base.Builder.CreateError(err)
-
+		return s.Builder.CreateError(err)
 	}
 
-	return s.Base.Builder.CreateResponse(ctx, s.Settings)
+	return s.Builder.CreateResponse(ctx, s.Settings)
 }
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 
 	write := s.Base.Service.BaseEndpoint(standards.TCP)
 	write.Name = "write"
-	tcp, err := configurations.LoadTCPAPI(ctx)
+	tcp, err := resources.LoadTCPAPI(ctx)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot load TCP api")
 	}
-	s.write, err = configurations.NewAPI(ctx, write, configurations.ToTCPAPI(tcp))
+	s.write, err = resources.NewAPI(ctx, write, resources.ToTCPAPI(tcp))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
 	}
 	read := s.Base.Service.BaseEndpoint(standards.TCP)
 	read.Name = "read"
-	s.read, err = configurations.NewAPI(ctx, read, configurations.ToTCPAPI(tcp))
+	s.read, err = resources.NewAPI(ctx, read, resources.ToTCPAPI(tcp))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
 	}

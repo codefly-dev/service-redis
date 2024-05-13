@@ -11,29 +11,27 @@ import (
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/configurations"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 )
 
 // Agent version
-var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(infoFS)))
+var agent = shared.Must(resources.LoadFromFs[resources.Agent](shared.Embed(infoFS)))
 
 var requirements = builders.NewDependencies(agent.Name,
 	builders.NewDependency("service.codefly.yaml"),
 	builders.NewDependency("migrations", "migrations").WithPathSelect(shared.NewSelect("*.sql")),
 )
 
-type Settings struct {
-	Debug bool `yaml:"debug"` // Developer only
+const WithReadReplicas = "with-read-replicas"
 
-	Watch       bool `yaml:"watch"`
-	Silent      bool `yaml:"silent"`
-	ReadReplica bool `yaml:"read-replica"`
-	Persist     bool `yaml:"persist"`
+type Settings struct {
+	Watch            bool `yaml:"watch"`
+	WithReadReplicas bool `yaml:"with-read-replicas"`
 }
 
-var image = &configurations.DockerImage{Name: "redis", Tag: "latest"}
+var image = &resources.DockerImage{Name: "redis", Tag: "latest"}
 
 type Service struct {
 	*services.Base
@@ -74,25 +72,16 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 func NewService() *Service {
 	return &Service{
-		Base:     services.NewServiceBase(context.Background(), agent.Of(configurations.ServiceAgent)),
+		Base:     services.NewServiceBase(context.Background(), agent.Of(resources.ServiceAgent)),
 		Settings: &Settings{},
 	}
 }
 
-//func (s *Service) CreateConnectionConfiguration(ctx context.Context, address string) string {
-//	password, _ := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "redis", "REDIS_PASSWORD")
-//	if password == "" {
-//		return fmt.Sprintf("redis://%s", address)
-//	} else {
-//		return fmt.Sprintf("redis://:%s@%s", password, address)
-//	}
-//}
-
 func main() {
 	agents.Register(
-		services.NewServiceAgent(agent.Of(configurations.ServiceAgent), NewService()),
-		services.NewBuilderAgent(agent.Of(configurations.RuntimeServiceAgent), NewBuilder()),
-		services.NewRuntimeAgent(agent.Of(configurations.BuilderServiceAgent), NewRuntime()))
+		services.NewServiceAgent(agent.Of(resources.ServiceAgent), NewService()),
+		services.NewBuilderAgent(agent.Of(resources.RuntimeServiceAgent), NewBuilder()),
+		services.NewRuntimeAgent(agent.Of(resources.BuilderServiceAgent), NewRuntime()))
 }
 
 //go:embed agent.codefly.yaml
