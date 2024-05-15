@@ -86,6 +86,7 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	require.Equal(t, 2, len(networkMappings))
 
 	init, err := runtime.Init(ctx, &runtimev0.InitRequest{
+		RuntimeContext:          resources.NewRuntimeContextFree(),
 		ProposedNetworkMappings: networkMappings,
 	})
 	require.NoError(t, err)
