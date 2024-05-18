@@ -1,4 +1,4 @@
-module github.com/codefly-dev/service-krakend
+module github.com/codefly-dev/service-redis
 
 go 1.22.0
 
