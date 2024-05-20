@@ -128,7 +128,7 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 
 	if withReplica {
 		// Ensure sync
-		time.Sleep(2 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 	// Read the value
 	val, err := readClient.Get(ctx, "key").Result()
