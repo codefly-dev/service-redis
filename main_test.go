@@ -13,6 +13,7 @@ import (
 	"github.com/codefly-dev/core/wool"
 	"github.com/stretchr/testify/require"
 	"os"
+	"path"
 	"testing"
 	"time"
 )
@@ -34,20 +35,20 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 
 	tmpDir := t.TempDir()
 	defer func(path string) {
-		err := os.RemoveAll(path)
-		require.NoError(t, err)
+		_ = os.RemoveAll(path)
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
 	service := resources.Service{Name: serviceName, Module: "mod", Version: "test-me"}
-	err := service.SaveAtDir(ctx, tmpDir)
+	err := service.SaveAtDir(ctx, path.Join(tmpDir, service.Unique()))
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
-		Name:      service.Name,
-		Module:    service.Module,
-		Workspace: workspace.Name,
-		Location:  tmpDir,
+		Name:                service.Name,
+		Module:              service.Module,
+		Workspace:           workspace.Name,
+		WorkspacePath:       tmpDir,
+		RelativeToWorkspace: service.Unique(),
 	}
 	builder := NewBuilder()
 
@@ -93,7 +94,7 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	require.NotNil(t, init)
 
 	defer func() {
-		_, err = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+		_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
 	}()
 
 	// Extract logs
