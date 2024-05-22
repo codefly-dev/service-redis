@@ -288,8 +288,7 @@ func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv
 }
 
 func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
-	//TODO implement me
-	panic("implement me")
+	return s.Runtime.TestResponse()
 }
 
 /* Details
