@@ -106,7 +106,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	conf := &basev0.Configuration{
 		Origin: s.Base.Service.Unique(),
-		Configurations: []*basev0.ConfigurationInformation{
+		Infos: []*basev0.ConfigurationInformation{
 			{
 				Name: "read",
 				ConfigurationValues: []*basev0.ConfigurationValue{

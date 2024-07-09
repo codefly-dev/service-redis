@@ -107,10 +107,10 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	require.NoError(t, err)
 
 	// extract the connection string
-	connWriteString, err := resources.FindConfigurationValue(configurationOut, "write", "connection")
+	connWriteString, err := resources.GetConfigurationValue(ctx, configurationOut, "write", "connection")
 	require.NoError(t, err)
 
-	connReadString, err := resources.FindConfigurationValue(configurationOut, "read", "connection")
+	connReadString, err := resources.GetConfigurationValue(ctx, configurationOut, "read", "connection")
 	require.NoError(t, err)
 
 	if withReplica {

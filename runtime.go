@@ -83,7 +83,7 @@ func (s *Runtime) CreateConnectionsConfiguration(runtimeContext *basev0.RuntimeC
 	return &basev0.Configuration{
 		Origin:         s.Base.Service.Unique(),
 		RuntimeContext: runtimeContext,
-		Configurations: infos,
+		Infos:          infos,
 	}
 }
 
@@ -205,7 +205,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	}
 
 	// extract the connection string
-	connWriteString, err := resources.FindConfigurationValue(configuration, "write", "connection")
+	connWriteString, err := resources.GetConfigurationValue(ctx, configuration, "write", "connection")
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 		return err
 	}
 
-	connReadString, err := resources.FindConfigurationValue(configuration, "read", "connection")
+	connReadString, err := resources.GetConfigurationValue(ctx, configuration, "read", "connection")
 	if err != nil {
 		return err
 	}
