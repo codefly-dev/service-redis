@@ -81,7 +81,7 @@ func (s *Runtime) CreateConnectionConfigurationInformation(ctx context.Context, 
 
 func (s *Runtime) CreateConnectionsConfiguration(runtimeContext *basev0.RuntimeContext, infos []*basev0.ConfigurationInformation) *basev0.Configuration {
 	return &basev0.Configuration{
-		Origin:         s.Base.Service.Unique(),
+		Origin:         s.Base.Unique(),
 		RuntimeContext: runtimeContext,
 		Infos:          infos,
 	}

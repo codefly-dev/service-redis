@@ -105,7 +105,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	writeService := fmt.Sprintf("redis://write-%s.%s.svc.cluster.local:6379", s.Base.Service.Name, namespace)
 
 	conf := &basev0.Configuration{
-		Origin: s.Base.Service.Unique(),
+		Origin: s.Base.Unique(),
 		Infos: []*basev0.ConfigurationInformation{
 			{
 				Name: "read",
@@ -211,7 +211,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 
-	write := s.Base.Service.BaseEndpoint(standards.TCP)
+	write := s.Base.BaseEndpoint(standards.TCP)
 	write.Name = "write"
 	tcp, err := resources.LoadTCPAPI(ctx)
 	if err != nil {
@@ -221,7 +221,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
 	}
-	read := s.Base.Service.BaseEndpoint(standards.TCP)
+	read := s.Base.BaseEndpoint(standards.TCP)
 	read.Name = "read"
 	s.read, err = resources.NewAPI(ctx, read, resources.ToTCPAPI(tcp))
 	if err != nil {
