@@ -10,6 +10,7 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
+	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/wool"
 	"github.com/go-redis/redis/v8"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -143,6 +144,17 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	} else {
 		// Use the instances
+		// Wait for master to be ready
+		err = shared.Retry(5*time.Second, 5, func() error {
+			client := redis.NewClient(&redis.Options{
+				Addr: fmt.Sprintf("localhost:%d", writeInstanceContainer.Port),
+			})
+			out := client.Ping(ctx)
+			return out.Err()
+		})
+		if err != nil {
+			return s.Runtime.InitErrorf(err, "cannot ping master")
+		}
 		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstanceContainer.Port), wool.Field("host", writeInstanceContainer.Hostname))
 		name := fmt.Sprintf("%s-read", s.UniqueWithWorkspace())
 		replicaRunner, err := runners.NewDockerHeadlessEnvironment(ctx, image, name)

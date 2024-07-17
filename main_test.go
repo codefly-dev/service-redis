@@ -39,16 +39,18 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
-	service := resources.Service{Name: serviceName, Module: "mod", Version: "test-me"}
-	err := service.SaveAtDir(ctx, path.Join(tmpDir, service.Unique()))
+	service := resources.Service{Name: serviceName, Version: "test-me"}
+	err := service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name))
+	service.WithModule("mod")
+
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
 		Name:                service.Name,
-		Module:              service.Module,
+		Module:              "mod",
 		Workspace:           workspace.Name,
 		WorkspacePath:       tmpDir,
-		RelativeToWorkspace: service.Unique(),
+		RelativeToWorkspace: fmt.Sprintf("mod/%s", service.Name),
 	}
 	builder := NewBuilder()
 
@@ -82,7 +84,7 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 
 	require.Equal(t, 2, len(runtime.Endpoints))
 
-	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Base.Service, runtime.Endpoints)
+	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Identity, runtime.Endpoints)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(networkMappings))
 
@@ -94,7 +96,7 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	require.NotNil(t, init)
 
 	defer func() {
-		_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+		//_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
 	}()
 
 	// Extract logs
@@ -102,7 +104,7 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
 
-	// Get the configuration and connect to postgres
+	// Get the configuration and connect to redis
 	configurationOut, err := resources.ExtractConfiguration(init.RuntimeConfigurations, resources.NewRuntimeContextNative())
 	require.NoError(t, err)
 
@@ -120,21 +122,28 @@ func testCreateToRun(t *testing.T, withReplica bool) {
 	// Connect to the redis
 	readClient, err := CreateRedisClient(connReadString)
 	require.NoError(t, err)
+
+	out := readClient.Ping(ctx)
+	require.NoError(t, out.Err())
+
 	writeClient, err := CreateRedisClient(connWriteString)
 	require.NoError(t, err)
+	out = writeClient.Ping(ctx)
+	require.NoError(t, out.Err())
 
 	// Write something
 	err = writeClient.Set(ctx, "key", "value", 0).Err()
 	require.NoError(t, err)
 
-	if withReplica {
-		// Ensure sync
-		time.Sleep(10 * time.Second)
-	}
-	// Read the value
-	val, err := readClient.Get(ctx, "key").Result()
+	val, err := writeClient.Get(ctx, "key").Result()
 	require.NoError(t, err)
 
+	// Read the value from read
+	err = shared.Retry(5*time.Second, 10, func() error {
+		val, err = readClient.Get(ctx, "key").Result()
+		return err
+	})
+	require.NoError(t, err)
 	// Check the value
 	require.Equal(t, "value", val)
 
