@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-redis
 go 1.22.0
 
 require (
-	github.com/codefly-dev/core v0.1.136
+	github.com/codefly-dev/core v0.1.138
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/golang-migrate/migrate/v4 v4.17.1
 	github.com/hashicorp/go-multierror v1.1.1
@@ -19,6 +19,7 @@ require (
 	github.com/VividCortex/ewma v1.2.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
+	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/bufbuild/protovalidate-go v0.6.3 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
