@@ -122,7 +122,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		},
 	}
 
-	err = s.EnvironmentVariables.AddConfigurations(conf)
+	err = s.EnvironmentVariables.AddConfigurations(ctx, conf)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
