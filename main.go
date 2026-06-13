@@ -30,7 +30,7 @@ type Settings struct {
 	RequirePass bool   `yaml:"require-pass"`
 }
 
-var image = &resources.DockerImage{Name: "redis", Tag: "7-alpine"}
+var image = &resources.DockerImage{Name: "redis", Tag: "8-alpine"}
 
 type Service struct {
 	*services.Base
