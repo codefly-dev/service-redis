@@ -1,6 +1,8 @@
 *.so
 .idea
 go.work*
-dist
-
 dist/
+.codefly
+*.hash
+# Built agent binary (rebuilt by `codefly agent build`).
+service-redis

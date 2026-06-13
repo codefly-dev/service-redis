@@ -3,21 +3,24 @@ package main
 import (
 	"context"
 	"embed"
-	"fmt"
+
 	"github.com/codefly-dev/core/agents/communicate"
-	"github.com/codefly-dev/core/agents/services"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
-	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
+	"github.com/codefly-dev/core/wool"
+
+	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/agents/services/audit"
+	"github.com/codefly-dev/core/agents/services/upgrade"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 )
 
 type Builder struct {
+	services.BuilderServer
 	*Service
-	NetworkMappings []*basev0.NetworkMapping
 }
 
 func NewBuilder() *Builder {
@@ -29,9 +32,17 @@ func NewBuilder() *Builder {
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
+	ctx = s.Wool.Inject(ctx)
+
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return nil, err
+	}
+
+	s.Wool.Debug("base loaded", wool.Field("identity", s.Identity))
+
+	if req.DisableCatch {
+		s.Wool.DisableCatch()
 	}
 
 	requirements.Localize(s.Location)
@@ -42,13 +53,6 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		if err != nil {
 			return nil, err
 		}
-		if req.CreationMode.Communicate {
-			// communication on CreateResponse
-			err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
-			if err != nil {
-				return s.Builder.LoadError(err)
-			}
-		}
 		return s.Builder.LoadResponse()
 	}
 
@@ -57,13 +61,18 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Builder.LoadError(err)
 	}
 
+	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
+	if err != nil {
+		return s.Builder.LoadError(err)
+	}
+
+	s.Wool.Debug("endpoint", wool.Field("tcp", s.TcpEndpoint))
+
 	return s.Builder.LoadResponse()
 }
 
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
-
-	ctx = s.Wool.Inject(ctx)
 
 	return s.Builder.InitResponse()
 }
@@ -82,44 +91,52 @@ func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builde
 }
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
+	defer s.Wool.Catch()
 
+	// Redis doesn't need a custom build step — the official image is used as-is
 	return s.Builder.BuildResponse()
 }
 
-type Parameters struct {
-	ReadSelector string
-	ReadReplica  bool
+// Audit scans the redis docker image for HIGH/CRITICAL CVEs via trivy.
+func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*builderv0.AuditResponse, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+	res, err := audit.Docker(ctx, image.FullName())
+	if err != nil {
+		return s.Builder.AuditError(err)
+	}
+	return s.Builder.AuditResponse(res.Findings, res.Outdated, res.Tool, res.Language)
+}
+
+// Upgrade reports a newer redis tag (within current major unless --major).
+func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*builderv0.UpgradeResponse, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+	res, err := upgrade.Docker(ctx, image.FullName(), upgrade.Options{
+		IncludeMajor: req.IncludeMajor,
+		DryRun:       req.DryRun,
+	})
+	if err != nil {
+		return s.Builder.UpgradeError(err)
+	}
+	return s.Builder.UpgradeResponse(res.Changes, res.LockfileDiff)
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	var k *builderv0.KubernetesDeployment
-	var err error
-	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
+	s.Builder.LogDeployRequest(req, s.Wool.Debug)
+
+	s.EnvironmentVariables.SetRunning()
+
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.TcpEndpoint, resources.NewPublicNetworkAccess())
+	if err != nil {
 		return s.Builder.DeployError(err)
 	}
 
-	namespace := k.Namespace
-	readService := fmt.Sprintf("redis://read-%s.%s.svc.cluster.local:6379", s.Base.Service.Name, namespace)
-	writeService := fmt.Sprintf("redis://write-%s.%s.svc.cluster.local:6379", s.Base.Service.Name, namespace)
-
-	conf := &basev0.Configuration{
-		Origin: s.Base.Unique(),
-		Infos: []*basev0.ConfigurationInformation{
-			{
-				Name: "read",
-				ConfigurationValues: []*basev0.ConfigurationValue{
-					{Key: "connection", Value: readService, Secret: true},
-				},
-			},
-			{
-				Name: "write",
-				ConfigurationValues: []*basev0.ConfigurationValue{
-					{Key: "connection", Value: writeService, Secret: true},
-				},
-			},
-		},
+	conf, err := s.CreateConnectionConfiguration(ctx, req.Configuration, instance)
+	if err != nil {
+		return s.Builder.DeployError(err)
 	}
 
 	err = s.EnvironmentVariables.AddConfigurations(ctx, conf)
@@ -129,7 +146,13 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.Configuration = conf
 
-	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
+	s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(conf)))
+
+	configs, err := s.EnvironmentVariables.Configurations()
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+	cm, err := services.EnvsAsConfigMapData(configs...)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
@@ -139,103 +162,62 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		return s.Builder.DeployError(err)
 	}
 
-	readSelector := "read"
-	if !s.Settings.WithReadReplicas {
-		readSelector = "write"
-	}
-
 	params := services.DeploymentParameters{
-		ConfigMap:  cm,
-		SecretMap:  secrets,
-		Parameters: Parameters{ReadSelector: readSelector, ReadReplica: s.Settings.WithReadReplicas},
+		ConfigMap: cm,
+		SecretMap: secrets,
 	}
-
+	var k *builderv0.KubernetesDeployment
+	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
+		return s.Builder.DeployError(err)
+	}
 	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
-
 	return s.Builder.DeployResponse()
-}
-
-func (s *Builder) Options() []*agentv0.Question {
-	return []*agentv0.Question{
-		communicate.NewConfirm(&agentv0.Message{Name: WithReadReplicas, Message: "Read replicas?", Description: "Split write and reads"}, true),
-	}
-}
-
-func (s *Builder) createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(s.Options()...)
-}
-
-type create struct {
-	DatabaseName string
-	TableName    string
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
-	if s.Builder.CreationMode.Communicate {
-		s.Wool.Debug("using communicate mode")
 
-		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-
-		s.Settings.WithReadReplicas, err = session.Confirm(WithReadReplicas)
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-
-	} else {
-		options := s.Options()
-		var err error
-		s.Settings.WithReadReplicas, err = communicate.GetDefaultConfirm(options, WithReadReplicas)
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-	}
-	err := s.Templates(ctx, create{}, services.WithBuilder(builderFS))
+	err := s.Templates(ctx, s.Information, services.WithFactory(factoryFS))
 	if err != nil {
 		return s.Builder.CreateError(err)
 	}
 
 	err = s.CreateEndpoints(ctx)
 	if err != nil {
-		return s.Builder.CreateError(err)
+		return s.Builder.CreateErrorf(err, "cannot create endpoints")
 	}
+
+	s.Wool.Debug("created endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
 
 	return s.Builder.CreateResponse(ctx, s.Settings)
 }
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
-
-	write := s.Base.BaseEndpoint(standards.TCP)
-	write.Name = "write"
 	tcp, err := resources.LoadTCPAPI(ctx)
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot load TCP api")
+		return s.Wool.Wrapf(err, "cannot load tcp api")
 	}
-	s.write, err = resources.NewAPI(ctx, write, resources.ToTCPAPI(tcp))
+	endpoint := s.Base.BaseEndpoint(standards.TCP)
+	endpoint.Visibility = resources.VisibilityExternal
+	s.TcpEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToTCPAPI(tcp))
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
+		return s.Wool.Wrapf(err, "cannot create tcp endpoint")
 	}
-	read := s.Base.BaseEndpoint(standards.TCP)
-	read.Name = "read"
-	s.read, err = resources.NewAPI(ctx, read, resources.ToTCPAPI(tcp))
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create read tcp endpoint")
-	}
-	s.Endpoints = []*basev0.Endpoint{s.write, s.read}
+	s.Endpoints = []*v0.Endpoint{s.TcpEndpoint}
 	return nil
+}
+
+func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error {
+	asker := communicate.NewQuestionAsker(stream)
+	_, err := asker.RunSequence(nil)
+	return err
 }
 
 //go:embed templates/factory
 var factoryFS embed.FS
-
-//go:embed templates/builder
-var builderFS embed.FS
 
 //go:embed templates/deployment
 var deploymentFS embed.FS

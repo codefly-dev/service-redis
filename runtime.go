@@ -2,28 +2,26 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"github.com/codefly-dev/core/agents"
-	"github.com/codefly-dev/core/agents/helpers/code"
+	"net"
+	"time"
+
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+
+	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/wool"
+
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
-	"github.com/codefly-dev/core/shared"
-	"github.com/codefly-dev/core/wool"
-	"github.com/go-redis/redis/v8"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
-	"github.com/hashicorp/go-multierror"
-	_ "github.com/lib/pq"
-	"time"
 )
 
 type Runtime struct {
+	services.RuntimeServer
 	*Service
 
 	// internal
-	runners   []runners.RunnerEnvironment
+	runnerEnvironment *runners.DockerEnvironment
+
 	redisPort uint16
 }
 
@@ -37,55 +35,35 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Runtime.SetEnvironment(req.Environment)
+	s.Runtime.LogLoadRequest(req)
 
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return s.Runtime.LoadErrorf(err, "loading base")
 	}
 
+	s.Runtime.SetEnvironment(req.Environment)
+
 	requirements.Localize(s.Location)
 
+	// Endpoints
 	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
-		return s.Runtime.LoadErrorf(err, "loading endpoints")
+		return s.Runtime.LoadErrorf(err, "cannot load endpoints")
 	}
 
-	s.write, err = resources.FindTCPEndpointWithName(ctx, "write", s.Endpoints)
-	if err != nil {
-		return s.Runtime.LoadErrorf(err, "finding write endpoint")
-	}
+	s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
 
-	s.read, err = resources.FindTCPEndpointWithName(ctx, "read", s.Endpoints)
+	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
-		return s.Runtime.LoadErrorf(err, "finding read endpoint")
-
+		return s.Runtime.LoadErrorf(err, "cannot find TCP endpoint")
 	}
 
 	return s.Runtime.LoadResponse()
 }
 
-func (s *Runtime) CreateConnectionConfigurationInformation(ctx context.Context, endpoint *basev0.Endpoint, instance *basev0.NetworkInstance) *basev0.ConfigurationInformation {
-
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-
-	connection := fmt.Sprintf("redis://%s:%d", instance.Hostname, instance.Port)
-
-	return &basev0.ConfigurationInformation{
-		Name: endpoint.Name,
-		ConfigurationValues: []*basev0.ConfigurationValue{
-			{Key: "connection", Value: connection, Secret: true},
-		},
-	}
-}
-
-func (s *Runtime) CreateConnectionsConfiguration(runtimeContext *basev0.RuntimeContext, infos []*basev0.ConfigurationInformation) *basev0.Configuration {
-	return &basev0.Configuration{
-		Origin:         s.Base.Unique(),
-		RuntimeContext: runtimeContext,
-		Infos:          infos,
-	}
+func CallingContext() *basev0.NetworkAccess {
+	return resources.NewNativeNetworkAccess()
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -94,173 +72,132 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Runtime.LogInitRequest(req)
 
-	writeMapping, err := resources.FindNetworkMapping(ctx, req.ProposedNetworkMappings, s.write)
+	w := s.Wool.In("runtime::init")
+
+	s.NetworkMappings = req.ProposedNetworkMappings
+
+	s.Configuration = req.Configuration
+
+	net, err := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	writeInstanceContainer, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.ProposedNetworkMappings, s.write, resources.NewContainerNetworkAccess())
+	if net == nil {
+		return s.Runtime.InitError(w.NewError("network mapping is nil"))
+	}
+
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, CallingContext())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.Infof("write endpoint will run on localhost:%d", writeInstanceContainer.Port)
+	if instance == nil {
+		return s.Runtime.InitError(w.NewError("network instance is nil"))
+	}
 
+	w.Debug("tcp network instance", wool.Field("instance", instance))
+
+	s.Infof("will run on %s", instance.Host)
 	s.redisPort = 6379
 
-	// runner for the write endpoint
+	// Create connection string resources for the network instance
+	for _, inst := range net.Instances {
+		conf, errConn := s.CreateConnectionConfiguration(ctx, s.Configuration, inst)
+		if errConn != nil {
+			return s.Runtime.InitError(errConn)
+		}
+		w.Debug("adding configuration", wool.Field("config", resources.MakeConfigurationSummary(conf)), wool.Field("instance", inst))
+		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
+	}
+	s.Wool.Debug("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
+
+	// Docker
 	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	runner.WithPortMapping(ctx, uint16(writeInstanceContainer.Port), s.redisPort)
-	runner.WithOutput(s.Logger)
+	runner.WithOutput(s.Wool)
+	runner.WithPortMapping(ctx, uint16(instance.Port), s.redisPort)
 
-	err = runner.Init(ctx)
+	// Load password from configuration
+	err = s.LoadConfiguration(ctx, s.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.runners = []runners.RunnerEnvironment{runner}
+	if s.redisPassword != "" {
+		runner.WithEnvironmentVariables(ctx,
+			resources.Env("REDIS_PASSWORD", s.redisPassword),
+		)
+		runner.WithCommand("redis-server", "--requirepass", s.redisPassword)
+	}
 
-	readMapping, err := resources.FindNetworkMapping(ctx, req.ProposedNetworkMappings, s.read)
+	s.runnerEnvironment = runner
+
+	w.Debug("init for runner environment: will start container")
+	err = s.runnerEnvironment.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	readInstanceContainer, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.ProposedNetworkMappings, s.read, resources.NewContainerNetworkAccess())
-	if err != nil {
-		return s.Runtime.InitError(err)
-	}
-
-	if !s.Settings.WithReadReplicas {
-		// Point to the write
-		readMapping = &basev0.NetworkMapping{
-			Endpoint:  s.read,
-			Instances: writeMapping.Instances,
-		}
-		s.Infof("read endpoint will run on localhost:%d", writeInstanceContainer.Port)
-
-	} else {
-		// Use the instances
-		// Wait for master to be ready
-		err = shared.Retry(5*time.Second, 5, func() error {
-			client := redis.NewClient(&redis.Options{
-				Addr: fmt.Sprintf("localhost:%d", writeInstanceContainer.Port),
-			})
-			out := client.Ping(ctx)
-			return out.Err()
-		})
-		if err != nil {
-			return s.Runtime.InitErrorf(err, "cannot ping master")
-		}
-		s.Wool.Debug("replicaRunner", wool.Field("port", writeInstanceContainer.Port), wool.Field("host", writeInstanceContainer.Hostname))
-		name := fmt.Sprintf("%s-read", s.UniqueWithWorkspace())
-		replicaRunner, err := runners.NewDockerHeadlessEnvironment(ctx, image, name)
-		if err != nil {
-			return s.Runtime.InitError(err)
-		}
-		replicaRunner.WithCommand("redis-server", "--replicaof", writeInstanceContainer.Hostname, fmt.Sprintf("%d", writeInstanceContainer.Port))
-		replicaRunner.WithPortMapping(ctx, uint16(readInstanceContainer.Port), s.redisPort)
-		runner.WithOutput(s.Logger)
-
-		// Create a replicaRunner identity
-		identity := s.Identity.Clone()
-		identity.Name = fmt.Sprintf("%s-read", s.Identity.Name)
-		out := agents.NewServiceProvider(ctx, identity).Get(ctx)
-		replicaRunner.WithOutput(out)
-		s.Infof("read endpoint will run on localhost:%d", readInstanceContainer.Port)
-
-		err = replicaRunner.Init(ctx)
-		if err != nil {
-			return s.Runtime.InitError(err)
-		}
-
-		s.runners = append(s.runners, replicaRunner)
-	}
-
-	s.NetworkMappings = []*basev0.NetworkMapping{writeMapping, readMapping}
-
-	informations := make(map[string][]*basev0.ConfigurationInformation)
-
-	for _, inst := range writeMapping.Instances {
-		informations[resources.RuntimeContextFromInstance(inst).Kind] = append(informations[resources.RuntimeContextFromInstance(inst).Kind], s.CreateConnectionConfigurationInformation(ctx, s.write, inst))
-	}
-	for _, inst := range readMapping.Instances {
-		informations[resources.RuntimeContextFromInstance(inst).Kind] = append(informations[resources.RuntimeContextFromInstance(inst).Kind], s.CreateConnectionConfigurationInformation(ctx, s.read, inst))
-	}
-	for _, runtimeContext := range []*basev0.RuntimeContext{resources.NewRuntimeContextNative(), resources.NewRuntimeContextContainer()} {
-		conf := s.CreateConnectionsConfiguration(runtimeContext, informations[runtimeContext.Kind])
-		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
-	}
-
+	s.Wool.Debug("init successful")
 	return s.Runtime.InitResponse()
-}
-
-func CreateRedisClient(conn string) (*redis.Client, error) {
-	opt, err := redis.ParseURL(conn)
-	if err != nil {
-		return nil, err
-	}
-	return redis.NewClient(opt), nil
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	// Get the configuration and connect to postgres
-	configuration, err := resources.ExtractConfiguration(s.Runtime.RuntimeConfigurations, resources.NewRuntimeContextNative())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, CallingContext())
 	if err != nil {
-		return err
+		return s.Wool.Wrapf(err, "cannot find network instance")
 	}
 
-	// extract the connection string
-	connWriteString, err := resources.GetConfigurationValue(ctx, configuration, "write", "connection")
-	if err != nil {
-		return err
-	}
-	write, err := CreateRedisClient(connWriteString)
-	if err != nil {
-		return err
-	}
+	// instance.Host is already host:port form ("localhost:65350"), while
+	// instance.Address is the same string. The previous "%s:%d" with
+	// Host doubled the port and produced "localhost:65350:65350" which
+	// trips net.Dial's "too many colons" error. Use Address directly.
+	address := instance.Address
+	s.Wool.Debug("waiting for redis to be ready", wool.Field("address", address))
 
-	connReadString, err := resources.GetConfigurationValue(ctx, configuration, "read", "connection")
-	if err != nil {
-		return err
-	}
-	read, err := CreateRedisClient(connReadString)
-	if err != nil {
-		return err
-	}
-	retries := 5
-	for i := 0; i < retries; i++ {
-		err = write.Ping(ctx).Err()
+	maxRetry := 10
+	for retry := 0; retry < maxRetry; retry++ {
+		conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 		if err == nil {
-			break
+			// Send PING command
+			_, err = conn.Write([]byte("*1\r\n$4\r\nPING\r\n"))
+			if err == nil {
+				buf := make([]byte, 64)
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				n, readErr := conn.Read(buf)
+				conn.Close()
+				if readErr == nil && n > 0 {
+					s.Wool.Debug("redis is ready!")
+					return nil
+				}
+			}
+			conn.Close()
 		}
-		time.Sleep(1 * time.Second)
+		s.Wool.Debug("waiting for redis to be ready", wool.ErrField(err))
+		time.Sleep(2 * time.Second)
 	}
-	for i := 0; i < retries; i++ {
-		err = read.Ping(ctx).Err()
-		if err == nil {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return nil
+	return s.Wool.NewError("redis is not ready")
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	s.Wool.Debug("starting")
+
 	err := s.WaitForReady(ctx)
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
 
+	s.Wool.Debug("start done")
 	return s.Runtime.StartResponse()
 }
 
@@ -273,41 +210,27 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 
 	s.Wool.Debug("nothing to stop: keep environment alive")
 
-	err := s.Base.Stop()
-	if err != nil {
-		return s.Runtime.StopError(err)
-	}
-
 	return s.Runtime.StopResponse()
 }
 
 func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
-	var agg error
-	for _, runner := range s.runners {
-		err := runner.Stop(ctx)
-		if err != nil {
-			agg = multierror.Append(agg, err)
-		}
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	s.Wool.Debug("Destroying")
+
+	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
+	if err != nil {
+		return s.Runtime.DestroyError(err)
 	}
-	if agg != nil {
-		return s.Runtime.DestroyError(agg)
+
+	err = runner.Shutdown(ctx)
+	if err != nil {
+		return s.Runtime.DestroyError(err)
 	}
 	return s.Runtime.DestroyResponse()
 }
 
-func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {
-	return s.Base.Communicate(ctx, req)
-}
-
 func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
 	return s.Runtime.TestResponse()
-}
-
-/* Details
-
- */
-
-func (s *Runtime) EventHandler(event code.Change) error {
-	s.Runtime.DesiredInit()
-	return nil
 }
