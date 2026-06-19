@@ -118,7 +118,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	runner.WithOutput(s.Wool)
+	runner.WithOutput(newRedisLogWriter(s.Wool))
 	runner.WithPortMapping(ctx, uint16(instance.Port), s.redisPort)
 
 	// Load password from configuration

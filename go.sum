@@ -34,6 +34,8 @@ github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/codefly-dev/core v0.2.2 h1:JgVKykDjmUBuknAQDWnTZmmNRxFGQ0SazCjrkAeNynQ=
 github.com/codefly-dev/core v0.2.2/go.mod h1:IzwUFBeRCpr7RcCqfO/Ti8zbYe8H0Zi2pkenUiMLvKk=
+github.com/codefly-dev/gortk v0.0.0-20260619134945-d5474be5f046 h1:+Bz59e+HysnawsANw2EmNfw6bJbx4nFkFQ+8j2pc5Gg=
+github.com/codefly-dev/gortk v0.0.0-20260619134945-d5474be5f046/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
 github.com/containerd/errdefs v1.0.0 h1:tg5yIfIlQIrxYtu9ajqY42W3lpS19XqdxRQeEwYG8PI=
 github.com/containerd/errdefs v1.0.0/go.mod h1:+YBYIdtsnF4Iw6nWZhJcqGSg/dwvV7tyJ/kCkyJ2k+M=
 github.com/containerd/errdefs/pkg v0.3.0 h1:9IKJ06FvyNlexW690DXuQNx2KA2cUJXx151Xdx3ZPPE=
