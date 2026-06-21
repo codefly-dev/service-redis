@@ -1,6 +1,6 @@
 publisher: codefly.dev
 kind: codefly:service
 name: redis
-version: 0.0.62
+version: 0.0.63
 quarantine: true
 quarantine_reason: "not yet migrated to the new-style agent architecture; skipped by bulk build until migrated"
