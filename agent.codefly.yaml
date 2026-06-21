@@ -2,5 +2,3 @@ publisher: codefly.dev
 kind: codefly:service
 name: redis
 version: 0.0.65
-quarantine: true
-quarantine_reason: "not yet migrated to the new-style agent architecture; skipped by bulk build until migrated"

@@ -22,6 +22,10 @@ type Runtime struct {
 	// internal
 	runnerEnvironment *dockerrun.DockerEnvironment
 
+	// nixRuntime is set instead of runnerEnvironment when the caller requests
+	// RuntimeContextNix — redis runs natively from a nix-provisioned binary.
+	nixRuntime *nixRedis
+
 	redisPort uint16
 }
 
@@ -112,34 +116,43 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 	s.Wool.Debug("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
 
-	// Docker
-	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
-	if err != nil {
+	// Load password from configuration — needed by both runtimes.
+	if err = s.LoadConfiguration(ctx, s.Configuration); err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	runner.WithOutput(newRedisLogWriter(s.Wool))
-	runner.WithPortMapping(ctx, uint16(instance.Port), s.redisPort)
-
-	// Load password from configuration
-	err = s.LoadConfiguration(ctx, s.Configuration)
-	if err != nil {
-		return s.Runtime.InitError(err)
-	}
-
-	if s.redisPassword != "" {
-		runner.WithEnvironmentVariables(ctx,
-			resources.Env("REDIS_PASSWORD", s.redisPassword),
-		)
-		runner.WithCommand("redis-server", "--requirepass", s.redisPassword)
-	}
-
-	s.runnerEnvironment = runner
-
-	w.Debug("init for runner environment: will start container")
-	err = s.runnerEnvironment.Init(ctx)
-	if err != nil {
-		return s.Runtime.InitError(err)
+	// Nix runtime: run redis natively from a nix-provisioned binary instead of a
+	// Docker container — selected when the caller requests RuntimeContextNix
+	// (e.g. a host without Docker). Same port, so WaitForReady is unchanged.
+	if rc := req.GetRuntimeContext(); rc != nil && rc.Kind == resources.RuntimeContextNix {
+		s.Infof("using nix runtime for redis on port %d", instance.Port)
+		nixr, errNix := newNixRedis(ctx, s.Location, uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
+		if errNix != nil {
+			return s.Runtime.InitError(errNix)
+		}
+		if errNix = nixr.Init(ctx); errNix != nil {
+			return s.Runtime.InitError(errNix)
+		}
+		s.nixRuntime = nixr
+	} else {
+		// Docker: container redis on 6379, mapped to the assigned port.
+		runner, errDocker := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
+		if errDocker != nil {
+			return s.Runtime.InitError(errDocker)
+		}
+		runner.WithOutput(newRedisLogWriter(s.Wool))
+		runner.WithPortMapping(ctx, uint16(instance.Port), s.redisPort)
+		if s.redisPassword != "" {
+			runner.WithEnvironmentVariables(ctx,
+				resources.Env("REDIS_PASSWORD", s.redisPassword),
+			)
+			runner.WithCommand("redis-server", "--requirepass", s.redisPassword)
+		}
+		s.runnerEnvironment = runner
+		w.Debug("init for runner environment: will start container")
+		if errDocker = s.runnerEnvironment.Init(ctx); errDocker != nil {
+			return s.Runtime.InitError(errDocker)
+		}
 	}
 
 	s.Wool.Debug("init successful")
@@ -218,6 +231,14 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	ctx = s.Wool.Inject(ctx)
 
 	s.Wool.Debug("Destroying")
+
+	// Nix runtime: terminate the native redis process; there is no container.
+	if s.nixRuntime != nil {
+		if err := s.nixRuntime.Stop(ctx); err != nil {
+			return s.Runtime.DestroyError(err)
+		}
+		return s.Runtime.DestroyResponse()
+	}
 
 	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
 	if err != nil {
