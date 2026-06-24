@@ -6,7 +6,7 @@ toolchain go1.26.4
 
 require (
 	github.com/codefly-dev/core v0.2.9
-	github.com/codefly-dev/gortk v0.0.0-20260621170842-c2212b7ad788
+	github.com/mind-build/gortk v0.1.0
 	google.golang.org/grpc v1.80.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -24,6 +24,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cheggaaa/pb/v3 v3.1.7 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/codefly-dev/gortk v0.0.0-20260621170842-c2212b7ad788 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
