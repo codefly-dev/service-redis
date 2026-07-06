@@ -51,7 +51,15 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	}
 
 	return &agentv0.AgentInformation{
-		RuntimeRequirements: []*agentv0.Runtime{},
+		// Advertise the nix runtime (implemented in nixredis.go via
+		// RuntimeContextNix) so the CLI's per-service Docker-free gate
+		// (flow.resolveDockerFallback → Runner.SupportsNix) lets this service
+		// fall back to a nix-provisioned native redis when Docker is
+		// unreachable. Without it the run hard-stops with "requires Docker"
+		// even though the nix path works.
+		RuntimeRequirements: []*agentv0.Runtime{
+			{Type: agentv0.Runtime_NIX},
+		},
 		Capabilities: []*agentv0.Capability{
 			{Type: agentv0.Capability_BUILDER},
 			{Type: agentv0.Capability_RUNTIME},
