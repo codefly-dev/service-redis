@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"net/url"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -14,6 +15,7 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 	"github.com/codefly-dev/core/resources"
+	runnersbase "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 )
@@ -50,22 +52,13 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return &agentv0.AgentInformation{
-		// Advertise the nix runtime (implemented in nixredis.go via
-		// RuntimeContextNix) so the CLI's per-service Docker-free gate
-		// (flow.resolveDockerFallback → Runner.SupportsNix) lets this service
-		// fall back to a nix-provisioned native redis when Docker is
-		// unreachable. Without it the run hard-stops with "requires Docker"
-		// even though the nix path works.
-		RuntimeRequirements: []*agentv0.Runtime{
-			{Type: agentv0.Runtime_NIX},
+	return services.Advertisement{
+		Backends: runnersbase.BackendSupport{
+			Nix:    true,
+			Docker: true,
 		},
-		Capabilities: []*agentv0.Capability{
-			{Type: agentv0.Capability_BUILDER},
-			{Type: agentv0.Capability_RUNTIME},
-		},
-		Protocols: []*agentv0.Protocol{},
-		ConfigurationDetails: []*agentv0.ConfigurationValueDetail{
+		ReadMe: readme,
+		Config: []*agentv0.ConfigurationValueDetail{
 			{
 				Name: "redis", Description: "redis connection details",
 				Fields: []*agentv0.ConfigurationValueInformation{
@@ -73,8 +66,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 				},
 			},
 		},
-		ReadMe: readme,
-	}, nil
+	}.Build(), nil
 }
 
 func NewService() *Service {
@@ -85,22 +77,22 @@ func NewService() *Service {
 }
 
 func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configuration) error {
-	// Configuration is optional — if no REDIS_PASSWORD is provided, run
-	// without auth. This is the sensible default for local dev + test
-	// environments; production deployments set the password via the
-	// standard configuration flow.
-	if conf == nil {
-		s.redisPassword = ""
-		return nil
+	// Runtime configuration has highest precedence; service.codefly.yaml's
+	// password is the local/default fallback. Previously Password and
+	// RequirePass parsed successfully but were never read in production.
+	pw := ""
+	if conf != nil {
+		configured, err := resources.GetConfigurationValue(ctx, conf, "redis", "REDIS_PASSWORD")
+		if err != nil {
+			return err
+		}
+		pw = configured
 	}
-	pw, err := resources.GetConfigurationValue(ctx, conf, "redis", "REDIS_PASSWORD")
-	if err != nil {
-		// Missing key is fine — empty password means no auth. Only
-		// surface genuine errors (malformed config, etc.) — but
-		// GetConfigurationValue returns an error for "not found" too, so
-		// treat any err as "no password configured".
-		s.redisPassword = ""
-		return nil
+	if pw == "" {
+		pw = s.Password
+	}
+	if s.RequirePass && pw == "" {
+		return fmt.Errorf("redis require-pass is enabled but no password is configured")
 	}
 	s.redisPassword = pw
 	return nil
@@ -108,7 +100,7 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 
 func (s *Service) createConnectionString(_ context.Context, address string) string {
 	if s.redisPassword != "" {
-		return fmt.Sprintf("redis://:%s@%s", s.redisPassword, address)
+		return (&url.URL{Scheme: "redis", Host: address, User: url.UserPassword("", s.redisPassword)}).String()
 	}
 	return fmt.Sprintf("redis://%s", address)
 }

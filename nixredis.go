@@ -18,13 +18,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
@@ -38,13 +41,14 @@ var redisFlakeLock string
 
 // nixRedis runs a native redis server off a nix-provisioned binary.
 type nixRedis struct {
-	env      *runners.NixEnvironment
-	flakeDir string
-	dataDir  string
-	port     uint16
-	password string
-	out      io.Writer
-	proc     runners.Proc
+	env        *runners.NixEnvironment
+	flakeDir   string
+	dataDir    string
+	configPath string
+	port       uint16
+	password   string
+	out        io.Writer
+	proc       runners.Proc
 	// serverCtx is the context the redis process runs under. It MUST outlive
 	// Init: starting redis under the Init RPC's ctx kills it the instant Init
 	// returns and that ctx is cancelled. Cancelled only by Stop.
@@ -56,11 +60,22 @@ type nixRedis struct {
 	binDir string
 }
 
-// newNixRedis materializes the embedded flake under baseDir/nix and prepares a
-// native redis rooted at baseDir/redis. baseDir is the agent's local service
-// dir, so data persists across restarts exactly like the Docker volume.
+// newNixRedis materializes the embedded flake and keeps all mutable state in a
+// private per-service user cache directory. Keeping Nix inputs, cache files,
+// Redis data, and the secret-bearing config out of the source checkout avoids
+// invalidating parent flakes and accidentally committing runtime state.
 func newNixRedis(ctx context.Context, baseDir string, port uint16, password string, out io.Writer) (*nixRedis, error) {
-	flakeDir := filepath.Join(baseDir, "nix")
+	runtimeRoot, err := redisRuntimeRoot(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("create redis runtime root: %w", err)
+	}
+	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("secure redis runtime root: %w", err)
+	}
+	flakeDir := filepath.Join(runtimeRoot, "nix")
 	if err := os.MkdirAll(flakeDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create nix flake dir: %w", err)
 	}
@@ -74,15 +89,29 @@ func newNixRedis(ctx context.Context, baseDir string, port uint16, password stri
 	if err != nil {
 		return nil, fmt.Errorf("nix environment (is nix installed?): %w", err)
 	}
-	env.WithCacheDir(filepath.Join(baseDir, ".nix-cache"))
+	env.WithCacheDir(filepath.Join(runtimeRoot, ".nix-cache"))
 	return &nixRedis{
-		env:      env,
-		flakeDir: flakeDir,
-		dataDir:  filepath.Join(baseDir, "redis"),
-		port:     port,
-		password: password,
-		out:      out,
+		env:        env,
+		flakeDir:   flakeDir,
+		dataDir:    filepath.Join(runtimeRoot, "data"),
+		configPath: filepath.Join(runtimeRoot, "redis.conf"),
+		port:       port,
+		password:   password,
+		out:        out,
 	}, nil
+}
+
+func redisServiceHash(baseDir string) string {
+	sum := sha256.Sum256([]byte(baseDir))
+	return hex.EncodeToString(sum[:])
+}
+
+func redisRuntimeRoot(baseDir string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = os.TempDir()
+	}
+	return filepath.Join(cache, "codefly", "redis", redisServiceHash(baseDir)[:16]), nil
 }
 
 // Init materializes the nix env, locates redis-server, launches it bound to the
@@ -94,8 +123,11 @@ func (n *nixRedis) Init(ctx context.Context) error {
 	if err := n.resolveStore(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
 		return fmt.Errorf("create redis data dir: %w", err)
+	}
+	if err := n.writeConfig(); err != nil {
+		return err
 	}
 	if err := n.startServer(ctx); err != nil {
 		return err
@@ -118,22 +150,43 @@ func (n *nixRedis) resolveStore() error {
 	return nil
 }
 
-// startServer launches redis-server bound to loopback on the assigned port. The
-// nix store is read-only, so the working/data dir is redirected to dataDir and
-// snapshotting is disabled (ephemeral dev runtime).
-func (n *nixRedis) startServer(ctx context.Context) error {
-	args := []string{
-		"--port", strconv.Itoa(int(n.port)),
-		"--bind", "127.0.0.1",
-		"--dir", n.dataDir,
-		"--save", "", // no RDB snapshots
-		"--appendonly", "no",
-		"--daemonize", "no",
+// writeConfig keeps the password out of process argv (and therefore ps/process
+// inspection). The parent runtime directory and this file are owner-only.
+func (n *nixRedis) writeConfig() error {
+	lines := []string{
+		"port " + strconv.Itoa(int(n.port)),
+		"bind 127.0.0.1",
+		"protected-mode yes",
+		"dir " + strconv.Quote(n.dataDir),
+		`save ""`,
+		"appendonly no",
+		"daemonize no",
 	}
 	if n.password != "" {
-		args = append(args, "--requirepass", n.password)
+		lines = append(lines, "requirepass "+strconv.Quote(n.password))
 	}
-	proc, err := n.env.NewProcess(filepath.Join(n.binDir, "redis-server"), args...)
+	contents := []byte(strings.Join(lines, "\n") + "\n")
+	file, err := os.OpenFile(n.configPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create redis config: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("secure redis config: %w", err)
+	}
+	if _, err := file.Write(contents); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write redis config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close redis config: %w", err)
+	}
+	return nil
+}
+
+// startServer launches redis-server with only the private config path in argv.
+func (n *nixRedis) startServer(ctx context.Context) error {
+	proc, err := n.env.NewProcess(filepath.Join(n.binDir, "redis-server"), n.serverArgs()...)
 	if err != nil {
 		return err
 	}
@@ -149,6 +202,10 @@ func (n *nixRedis) startServer(ctx context.Context) error {
 	}
 	n.proc = proc
 	return nil
+}
+
+func (n *nixRedis) serverArgs() []string {
+	return []string{n.configPath}
 }
 
 // waitReady polls the redis port with a PING until it answers. A passworded

@@ -146,7 +146,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			runner.WithEnvironmentVariables(ctx,
 				resources.Env("REDIS_PASSWORD", s.redisPassword),
 			)
-			runner.WithCommand("redis-server", "--requirepass", s.redisPassword)
+			runner.WithCommand(redisDockerCommand()...)
 		}
 		s.runnerEnvironment = runner
 		w.Debug("init for runner environment: will start container")
@@ -157,6 +157,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Wool.Debug("init successful")
 	return s.Runtime.InitResponse()
+}
+
+func redisDockerCommand() []string {
+	// Keep the password out of docker inspect's process argv. The fixed shell
+	// fragment expands the container environment variable inside the container.
+	return []string{"sh", "-c", `exec redis-server --requirepass "$REDIS_PASSWORD"`}
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context) error {
