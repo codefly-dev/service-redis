@@ -16,7 +16,7 @@ import (
 )
 
 type Runtime struct {
-	services.RuntimeServer
+	*services.DefaultRuntime
 	*Service
 
 	// internal
@@ -30,44 +30,29 @@ type Runtime struct {
 }
 
 func NewRuntime() *Runtime {
+	service := NewService()
 	return &Runtime{
-		Service: NewService(),
+		DefaultRuntime: services.NewDefaultRuntime(service.Runtime),
+		Service:        service,
 	}
 }
 
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
 	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
 
-	s.Runtime.LogLoadRequest(req)
-
-	err := s.Base.Load(ctx, req.Identity, s.Settings)
-	if err != nil {
-		return s.Runtime.LoadErrorf(err, "loading base")
-	}
-
-	s.Runtime.SetEnvironment(req.Environment)
-
-	requirements.Localize(s.Location)
-
-	// Endpoints
-	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
-	if err != nil {
-		return s.Runtime.LoadErrorf(err, "cannot load endpoints")
-	}
-
-	s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
-
-	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
-	if err != nil {
-		return s.Runtime.LoadErrorf(err, "cannot find TCP endpoint")
-	}
-
-	return s.Runtime.LoadResponse()
-}
-
-func CallingContext() *basev0.NetworkAccess {
-	return resources.NewNativeNetworkAccess()
+	return s.Runtime.LoadService(ctx, req, services.RuntimeLoad{
+		Settings:     s.Settings,
+		Requirements: requirements,
+		ResolveEndpoints: func(ctx context.Context, endpoints []*basev0.Endpoint) error {
+			s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(endpoints)))
+			endpoint, err := resources.FindTCPEndpoint(ctx, endpoints)
+			if err != nil {
+				return s.Wool.Wrapf(err, "cannot find TCP endpoint")
+			}
+			s.TcpEndpoint = endpoint
+			return nil
+		},
+	})
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -75,6 +60,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	ctx = s.Wool.Inject(ctx)
 
 	s.Runtime.LogInitRequest(req)
+	s.Runtime.WithContext(req.GetRuntimeContext())
 
 	w := s.Wool.In("runtime::init")
 
@@ -91,7 +77,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(w.NewError("network mapping is nil"))
 	}
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, CallingContext())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, s.Runtime.NetworkAccess())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -169,7 +155,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, CallingContext())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, s.Runtime.NetworkAccess())
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot find network instance")
 	}
@@ -218,10 +204,6 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.Wool.Debug("start done")
 	return s.Runtime.StartResponse()
-}
-
-func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationRequest) (*runtimev0.InformationResponse, error) {
-	return s.Runtime.InformationResponse(ctx, req)
 }
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {

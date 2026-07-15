@@ -14,87 +14,38 @@ import (
 	"github.com/codefly-dev/core/agents/services/audit"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
-	"github.com/codefly-dev/core/shared"
-	"github.com/codefly-dev/core/templates"
 )
 
 type Builder struct {
-	services.BuilderServer
+	*services.DefaultBuilder
 	*Service
 }
 
 func NewBuilder() *Builder {
+	service := NewService()
 	return &Builder{
-		Service: NewService(),
+		DefaultBuilder: services.NewDefaultBuilder(service.Builder),
+		Service:        service,
 	}
 }
 
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
-	ctx = s.Wool.Inject(ctx)
-
-	err := s.Base.Load(ctx, req.Identity, s.Settings)
-	if err != nil {
-		return nil, err
-	}
-
-	s.Wool.Debug("base loaded", wool.Field("identity", s.Identity))
-
-	if req.DisableCatch {
-		s.Wool.DisableCatch()
-	}
-
-	requirements.Localize(s.Location)
-
-	if req.CreationMode != nil {
-		s.Builder.CreationMode = req.CreationMode
-		s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
-		if err != nil {
-			return nil, err
-		}
-		return s.Builder.LoadResponse()
-	}
-
-	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
-
-	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
-
-	s.Wool.Debug("endpoint", wool.Field("tcp", s.TcpEndpoint))
-
-	return s.Builder.LoadResponse()
-}
-
-func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
-	defer s.Wool.Catch()
-
-	return s.Builder.InitResponse()
-}
-
-func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
-	defer s.Wool.Catch()
-
-	return &builderv0.UpdateResponse{}, nil
-}
-
-func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-
-	return s.Builder.SyncResponse()
-}
-
-func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
-	defer s.Wool.Catch()
-
-	// Redis doesn't need a custom build step — the official image is used as-is
-	return s.Builder.BuildResponse()
+	return s.Builder.LoadService(ctx, req, services.BuilderLoad{
+		Settings:         s.Settings,
+		Requirements:     requirements,
+		FactoryTemplates: factoryFS,
+		ResolveEndpoints: func(ctx context.Context, endpoints []*v0.Endpoint) error {
+			endpoint, err := resources.FindTCPEndpoint(ctx, endpoints)
+			if err != nil {
+				return err
+			}
+			s.TcpEndpoint = endpoint
+			s.Wool.Debug("endpoint", wool.Field("tcp", endpoint))
+			return nil
+		},
+	})
 }
 
 // Audit scans the redis docker image for HIGH/CRITICAL CVEs via trivy.
@@ -124,57 +75,24 @@ func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
+	s.Base.SetDockerImage(image)
 
-	s.Builder.LogDeployRequest(req, s.Wool.Debug)
-
-	s.EnvironmentVariables.SetRunning()
-
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.TcpEndpoint, resources.NewPublicNetworkAccess())
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-
-	conf, err := s.CreateConnectionConfiguration(ctx, req.Configuration, instance)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-
-	err = s.EnvironmentVariables.AddConfigurations(ctx, conf)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-
-	s.Configuration = conf
-
-	s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(conf)))
-
-	configs, err := s.EnvironmentVariables.Configurations()
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-	cm, err := services.EnvsAsConfigMapData(configs...)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-
-	secrets, err := services.EnvsAsSecretData(s.EnvironmentVariables.Secrets()...)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-
-	params := services.DeploymentParameters{
-		ConfigMap: cm,
-		SecretMap: secrets,
-	}
-	var k *builderv0.KubernetesDeployment
-	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
-		return s.Builder.DeployError(err)
-	}
-	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-	return s.Builder.DeployResponse()
+	return s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
+		EnvironmentVariables: s.EnvironmentVariables,
+		Templates:            deploymentFS,
+		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
+			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
+			if err != nil {
+				return err
+			}
+			configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance)
+			if err != nil {
+				return err
+			}
+			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
+			return deployment.ExportConfiguration(ctx, configuration)
+		},
+	})
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {

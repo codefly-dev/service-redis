@@ -14,7 +14,7 @@ spec:
       labels:
         app: {{.Name}}
     spec:
-      # uid 999 = redis user in the official redis:7-alpine image.
+      # uid 999 = redis user in the official Redis Alpine image.
       # fsGroup matches so the redis process can write the data dir.
       securityContext:
         runAsNonRoot: true
@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: redis
-          image: redis:7-alpine
+          image: {{ .Image }}
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
