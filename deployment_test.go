@@ -232,11 +232,13 @@ func promotableDeploymentRequest(
 		NetworkMappings: networkMappings,
 		Deployment: &builderv0.Deployment{Kind: &builderv0.Deployment_Kubernetes{
 			Kubernetes: &builderv0.KubernetesDeployment{
-				Namespace:          "codefly-test",
-				Destination:        destination,
-				Profile:            builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
-				SecretReferences:   secretReferences,
-				ValidateServerSide: validateServerSide,
+				Namespace:            "codefly-test",
+				Destination:          destination,
+				Profile:              builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
+				SecretReferences:     secretReferences,
+				ValidateServerSide:   validateServerSide,
+				ValidationKubeconfig: "/tmp/codefly-test-kubeconfig",
+				ValidationContext:    "k3d-codefly-test",
 			},
 		}},
 	}
