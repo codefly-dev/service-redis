@@ -48,14 +48,24 @@ spec:
             - secretRef:
                 name: {{.Name}}-secret
 {{- else }}
+{{- with .Deployment.Parameters.PasswordReference }}
+          command:
+            - sh
+            - -c
+            - 'test -n "$REDIS_PASSWORD" && exec redis-server --requirepass "$REDIS_PASSWORD"'
           env:
-{{- range $environmentVariable, $reference := .SecretReferences }}
-            - name: {{ $environmentVariable }}
+            - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ $reference.Name }}
-                  key: {{ $reference.Key }}
-                  optional: {{ $reference.Optional }}
+                  name: {{ .Name }}
+                  key: {{ .Key }}
+                  optional: false
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Name }}
+                  key: {{ .Key }}
+                  optional: false
 {{- end }}
 {{- end }}
           resources:

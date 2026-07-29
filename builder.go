@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -18,6 +19,10 @@ import (
 type Builder struct {
 	*services.DefaultBuilder
 	*Service
+}
+
+type deploymentTemplateParameters struct {
+	PasswordReference *builderv0.KubernetesSecretKeyReference
 }
 
 func NewBuilder() *Builder {
@@ -78,28 +83,64 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	defer s.Wool.Catch()
 	s.Base.SetDockerImage(image)
 
-	return s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
+	parameters := &deploymentTemplateParameters{}
+	var promotableConfiguration *v0.Configuration
+	response, err := s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
-		Prepare:              s.prepareDeployment,
+		Parameters:           parameters,
+		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
+			configuration, prepareErr := s.prepareDeployment(ctx, deployment, parameters)
+			if prepareErr != nil {
+				return prepareErr
+			}
+			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
+			if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+				promotableConfiguration = configuration
+				return nil
+			}
+			return deployment.ExportConfiguration(ctx, configuration)
+		},
 	})
+	if err != nil ||
+		response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS ||
+		promotableConfiguration == nil {
+		return response, err
+	}
+	response.Configuration = promotableConfiguration
+	return response, nil
 }
 
-func (s *Builder) prepareDeployment(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
-	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
-		return nil
-	}
+func (s *Builder) prepareDeployment(
+	ctx context.Context,
+	deployment *services.KustomizeDeploymentContext,
+	parameters *deploymentTemplateParameters,
+) (*v0.Configuration, error) {
 	req := deployment.Request
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+		passwordKey := resources.ServiceSecretConfigurationKeyFromUnique(s.Unique(), "redis", "REDIS_PASSWORD")
+		passwordReference := deployment.Kubernetes.GetSecretReferences()[passwordKey]
+		if passwordReference == nil {
+			if s.RequirePass || s.Password != "" {
+				return nil, fmt.Errorf("redis authentication requires a typed Kubernetes Secret reference for %s", passwordKey)
+			}
+		} else {
+			if passwordReference.GetOptional() {
+				return nil, fmt.Errorf("redis password Secret reference must not be optional")
+			}
+			parameters.PasswordReference = passwordReference
+		}
+		return s.promotableConnectionConfiguration(instance), nil
 	}
 	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
-	return deployment.ExportConfiguration(ctx, configuration)
+	return configuration, nil
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {

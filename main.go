@@ -134,6 +134,21 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	return outputConf, nil
 }
 
+func (s *Service) promotableConnectionConfiguration(instance *basev0.NetworkInstance) *basev0.Configuration {
+	return &basev0.Configuration{
+		Origin:         s.Unique(),
+		RuntimeContext: resources.RuntimeContextFromInstance(instance),
+		Infos: []*basev0.ConfigurationInformation{
+			{
+				Name: "redis",
+				ConfigurationValues: []*basev0.ConfigurationValue{
+					{Key: "connection", Secret: true},
+				},
+			},
+		},
+	}
+}
+
 func main() {
 	svc := NewService()
 	agents.Serve(agents.PluginRegistration{
