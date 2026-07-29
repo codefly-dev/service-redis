@@ -66,7 +66,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	s.Configuration = req.Configuration
+	configuration := req.GetConfiguration()
 
 	net, err := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TcpEndpoint)
 	if err != nil {
@@ -93,7 +93,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	// Create connection string resources for the network instance
 	for _, inst := range net.Instances {
-		conf, errConn := s.CreateConnectionConfiguration(ctx, s.Configuration, inst)
+		conf, errConn := s.CreateConnectionConfiguration(ctx, configuration, inst)
 		if errConn != nil {
 			return s.Runtime.InitError(errConn)
 		}
@@ -103,7 +103,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Wool.Debug("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
 
 	// Load password from configuration — needed by both runtimes.
-	if err = s.LoadConfiguration(ctx, s.Configuration); err != nil {
+	if err = s.LoadConfiguration(ctx, configuration); err != nil {
 		return s.Runtime.InitError(err)
 	}
 

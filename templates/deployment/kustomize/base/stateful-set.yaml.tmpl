@@ -14,6 +14,7 @@ spec:
       labels:
         app: {{.Name}}
     spec:
+      automountServiceAccountToken: false
       # uid 999 = redis user in the official Redis Alpine image.
       # fsGroup matches so the redis process can write the data dir.
       securityContext:
@@ -42,9 +43,21 @@ spec:
           ports:
             - name: redis
               containerPort: 6379
+{{- if not .GitOps }}
           envFrom:
             - secretRef:
                 name: {{.Name}}-secret
+{{- else }}
+          env:
+{{- range $environmentVariable, $reference := .SecretReferences }}
+            - name: {{ $environmentVariable }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $reference.Name }}
+                  key: {{ $reference.Key }}
+                  optional: {{ $reference.Optional }}
+{{- end }}
+{{- end }}
           resources:
             requests:
               cpu: 50m

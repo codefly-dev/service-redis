@@ -81,19 +81,25 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	return s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
-		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
-			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
-			if err != nil {
-				return err
-			}
-			configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance)
-			if err != nil {
-				return err
-			}
-			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
-			return deployment.ExportConfiguration(ctx, configuration)
-		},
+		Prepare:              s.prepareDeployment,
 	})
+}
+
+func (s *Builder) prepareDeployment(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
+	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+		return nil
+	}
+	req := deployment.Request
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
+	if err != nil {
+		return err
+	}
+	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance)
+	if err != nil {
+		return err
+	}
+	s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
+	return deployment.ExportConfiguration(ctx, configuration)
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
