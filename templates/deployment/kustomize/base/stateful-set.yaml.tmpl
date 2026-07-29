@@ -47,15 +47,15 @@ spec:
           envFrom:
             - secretRef:
                 name: {{.Name}}-secret
-{{- end }}
-{{- if .GitOps }}
+{{- else }}
           env:
-{{- range $key, $reference := .SecretReferences }}
-            - name: {{ $key }}
+{{- range $environmentVariable, $reference := .SecretReferences }}
+            - name: {{ $environmentVariable }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $reference.Name }}
                   key: {{ $reference.Key }}
+                  optional: {{ $reference.Optional }}
 {{- end }}
 {{- end }}
           resources:
