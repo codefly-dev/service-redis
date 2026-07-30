@@ -34,8 +34,8 @@ github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJ
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
 github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
-github.com/codefly-dev/core v0.2.52 h1:bHudneVK/yLMxEc163v9Hm590E1Z6x7HWkZVdoA3CIA=
-github.com/codefly-dev/core v0.2.52/go.mod h1:hHJm+wOsHxpxKn4UMiFqBrGy0BE56iby9yptfygbdR4=
+github.com/codefly-dev/core v0.2.59 h1:uEOoYFNRf6q7unRH37cDM7ccZuQ6QTDIHnuoDfGoDnA=
+github.com/codefly-dev/core v0.2.59/go.mod h1:hHJm+wOsHxpxKn4UMiFqBrGy0BE56iby9yptfygbdR4=
 github.com/codefly-dev/gortk v0.2.0 h1:7bOlS5valYz2zil+fZctQNcPCYBcPj86abcw9N8h1hQ=
 github.com/codefly-dev/gortk v0.2.0/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
 github.com/containerd/errdefs v1.0.0 h1:tg5yIfIlQIrxYtu9ajqY42W3lpS19XqdxRQeEwYG8PI=
