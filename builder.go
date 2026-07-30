@@ -84,7 +84,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	s.Base.SetDockerImage(image)
 
 	parameters := &deploymentTemplateParameters{}
-	var promotableConfiguration *v0.Configuration
+	var restrictedConfiguration *v0.Configuration
 	response, err := s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
@@ -95,8 +95,8 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 				return prepareErr
 			}
 			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
-			if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
-				promotableConfiguration = configuration
+			if services.IsRestrictedOutputProfile(deployment.Profile) {
+				restrictedConfiguration = configuration
 				return nil
 			}
 			return deployment.ExportConfiguration(ctx, configuration)
@@ -104,10 +104,10 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	})
 	if err != nil ||
 		response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS ||
-		promotableConfiguration == nil {
+		restrictedConfiguration == nil {
 		return response, err
 	}
-	response.Configuration = promotableConfiguration
+	response.Configuration = restrictedConfiguration
 	return response, nil
 }
 
@@ -121,7 +121,7 @@ func (s *Builder) prepareDeployment(
 	if err != nil {
 		return nil, err
 	}
-	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+	if services.IsRestrictedOutputProfile(deployment.Profile) {
 		passwordKey := resources.ServiceSecretConfigurationKeyFromUnique(s.Unique(), "redis", "REDIS_PASSWORD")
 		passwordReference := deployment.Kubernetes.GetSecretReferences()[passwordKey]
 		if passwordReference == nil {
@@ -134,7 +134,7 @@ func (s *Builder) prepareDeployment(
 			}
 			parameters.PasswordReference = passwordReference
 		}
-		return s.promotableConnectionConfiguration(instance), nil
+		return s.restrictedConnectionConfiguration(instance), nil
 	}
 	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance)
 	if err != nil {

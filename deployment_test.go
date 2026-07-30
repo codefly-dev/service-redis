@@ -27,7 +27,7 @@ func TestDeploymentTemplates(t *testing.T) {
 	}
 }
 
-func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionReference(t *testing.T) {
+func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectionReference(t *testing.T) {
 	useSuccessfulKubectl(t)
 	builder, networkMappings := newDeploymentTestBuilder(t)
 	builder.RequirePass = true
@@ -38,7 +38,7 @@ func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionR
 	)
 	destination := t.TempDir()
 
-	response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
+	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
 		destination,
 		networkMappings,
 		map[string]*builderv0.KubernetesSecretKeyReference{
@@ -61,7 +61,7 @@ func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionR
 	}
 
 	output := response.GetDeployment().GetKubernetes()
-	if output.GetProfile() != builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+	if output.GetProfile() != builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1 {
 		t.Fatalf("output profile = %s", output.GetProfile())
 	}
 	if output.GetContractVersion() != services.KubernetesManifestContractVersion {
@@ -73,6 +73,8 @@ func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionR
 	if output.GetValidation().GetServerSideValidation() != builderv0.KubernetesManifestValidation_STATUS_PASSED {
 		t.Fatalf("server-side validation failed: %v", output.GetValidation().GetViolations())
 	}
+
+	assertRestrictedManifestBundle(t, output, passwordEnvironmentKey)
 
 	configuration := response.GetConfiguration()
 	if configuration.GetOrigin() != builder.Unique() {
@@ -105,7 +107,7 @@ func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionR
 		"key: password",
 	} {
 		if !strings.Contains(statefulSet, expected) {
-			t.Errorf("GitOps StatefulSet missing %q:\n%s", expected, statefulSet)
+			t.Errorf("restricted StatefulSet missing %q:\n%s", expected, statefulSet)
 		}
 	}
 	for _, unexpected := range []string{
@@ -115,7 +117,7 @@ func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionR
 		"unrelated-credentials",
 	} {
 		if strings.Contains(statefulSet, unexpected) {
-			t.Errorf("GitOps StatefulSet contains %q:\n%s", unexpected, statefulSet)
+			t.Errorf("restricted StatefulSet contains %q:\n%s", unexpected, statefulSet)
 		}
 	}
 
@@ -127,12 +129,12 @@ func TestPromotableGitOpsDeploymentConfiguresAuthenticationAndReturnsConnectionR
 		"\nstringData:",
 	} {
 		if strings.Contains(tree, unexpected) {
-			t.Errorf("GitOps manifest tree contains %q:\n%s", unexpected, tree)
+			t.Errorf("restricted manifest tree contains %q:\n%s", unexpected, tree)
 		}
 	}
 }
 
-func TestPromotableGitOpsRequirePassRejectsUnusablePasswordReference(t *testing.T) {
+func TestRestrictedPortableRequirePassRejectsUnusablePasswordReference(t *testing.T) {
 	tests := []struct {
 		name       string
 		references func(*Builder) map[string]*builderv0.KubernetesSecretKeyReference
@@ -167,7 +169,7 @@ func TestPromotableGitOpsRequirePassRejectsUnusablePasswordReference(t *testing.
 				references = test.references(builder)
 			}
 
-			response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
+			response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
 				t.TempDir(),
 				networkMappings,
 				references,
@@ -221,7 +223,7 @@ func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping)
 	}}
 }
 
-func promotableDeploymentRequest(
+func restrictedDeploymentRequest(
 	destination string,
 	networkMappings []*basev0.NetworkMapping,
 	secretReferences map[string]*builderv0.KubernetesSecretKeyReference,
@@ -234,7 +236,7 @@ func promotableDeploymentRequest(
 			Kubernetes: &builderv0.KubernetesDeployment{
 				Namespace:            "codefly-test",
 				Destination:          destination,
-				Profile:              builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
+				Profile:              builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1,
 				SecretReferences:     secretReferences,
 				ValidateServerSide:   validateServerSide,
 				ValidationKubeconfig: "/tmp/codefly-test-kubeconfig",
@@ -280,4 +282,42 @@ func readManifestTree(t *testing.T, root string) string {
 		t.Fatal(err)
 	}
 	return manifests.String()
+}
+
+func assertRestrictedManifestBundle(t *testing.T, output *builderv0.KubernetesDeploymentOutput, passwordKey string) {
+	t.Helper()
+	bundle := output.GetBundle()
+	if bundle == nil {
+		t.Fatal("restricted output carries no manifest bundle")
+	}
+	if bundle.GetFormat() != builderv0.KubernetesDeploymentOutput_KUSTOMIZE {
+		t.Errorf("bundle format = %s", bundle.GetFormat())
+	}
+	if bundle.GetProfile() != builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1 {
+		t.Errorf("bundle profile = %s", bundle.GetProfile())
+	}
+	if bundle.GetContractVersion() != services.KubernetesManifestContractVersion {
+		t.Errorf("bundle contract version = %q", bundle.GetContractVersion())
+	}
+	if len(bundle.GetEntryPoints()) == 0 {
+		t.Error("bundle exposes no entry points")
+	}
+	if !strings.HasPrefix(bundle.GetDigest(), "sha256:") {
+		t.Errorf("bundle digest = %q, want sha256-pinned aggregate", bundle.GetDigest())
+	}
+	if len(bundle.GetFiles()) == 0 {
+		t.Fatal("bundle inventory is empty")
+	}
+	for _, file := range bundle.GetFiles() {
+		if file.GetPath() == "" || !strings.HasPrefix(file.GetDigest(), "sha256:") {
+			t.Errorf("bundle inventory entry = %+v, want path and sha256 digest", file)
+		}
+	}
+	if bundle.GetValidation().GetStaticValidation() != builderv0.KubernetesManifestValidation_STATUS_PASSED {
+		t.Errorf("bundle validation not passed: %v", bundle.GetValidation().GetViolations())
+	}
+	reference := bundle.GetSecretReferences()[passwordKey]
+	if reference.GetName() == "" || reference.GetKey() == "" {
+		t.Errorf("bundle dropped the external password Secret reference for %s", passwordKey)
+	}
 }

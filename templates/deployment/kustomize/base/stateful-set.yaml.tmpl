@@ -43,7 +43,7 @@ spec:
           ports:
             - name: redis
               containerPort: 6379
-{{- if not .GitOps }}
+{{- if not .Restricted }}
           envFrom:
             - secretRef:
                 name: {{.Name}}-secret
