@@ -117,7 +117,7 @@ func (s *Builder) prepareDeployment(
 	parameters *deploymentTemplateParameters,
 ) (*v0.Configuration, error) {
 	req := deployment.Request
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewContainerNetworkAccess())
 	if err != nil {
 		return nil, err
 	}
