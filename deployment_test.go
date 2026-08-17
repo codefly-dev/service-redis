@@ -216,7 +216,7 @@ func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping)
 		Api:     "tcp",
 	}
 	instance := resources.NewNetworkInstance("redis.example.com", 6379)
-	instance.Access = resources.NewPublicNetworkAccess()
+	instance.Access = resources.NewContainerNetworkAccess()
 	return builder, []*basev0.NetworkMapping{{
 		Endpoint:  builder.TcpEndpoint,
 		Instances: []*basev0.NetworkInstance{instance},
