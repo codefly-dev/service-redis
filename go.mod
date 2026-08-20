@@ -5,7 +5,7 @@ go 1.26
 toolchain go1.26.4
 
 require (
-	github.com/codefly-dev/core v0.3.3
+	github.com/codefly-dev/core v0.3.4
 	github.com/codefly-dev/gortk v0.2.0
 	google.golang.org/grpc v1.83.0
 	gopkg.in/yaml.v3 v3.0.1
