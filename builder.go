@@ -41,7 +41,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		Requirements:     requirements,
 		FactoryTemplates: factoryFS,
 		ResolveEndpoints: func(ctx context.Context, endpoints []*v0.Endpoint) error {
-			endpoint, err := resources.FindTCPEndpoint(ctx, endpoints)
+			endpoint, err := resolveServingTCPEndpoint(ctx, endpoints)
 			if err != nil {
 				return err
 			}

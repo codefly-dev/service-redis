@@ -17,6 +17,7 @@ import (
 	"github.com/codefly-dev/core/resources"
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/templates"
 )
 
@@ -71,6 +72,28 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 			},
 		},
 	}.Build(), nil
+}
+
+// resolveServingTCPEndpoint selects the single TCP endpoint the redis agent
+// binds its runtime and deployment to. A read-replica topology declares several
+// tcp endpoints (e.g. read + write) on one shared port; they all address the
+// same redis instance, so any of them resolves the network mapping. Core's
+// FindTCPEndpoint rejects that ambiguity, so prefer the write/primary endpoint
+// when present and otherwise fall back to the first declared TCP endpoint.
+func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) (*basev0.Endpoint, error) {
+	tcp := resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints)
+	switch len(tcp) {
+	case 0:
+		return nil, fmt.Errorf("no tcp endpoint found")
+	case 1:
+		return tcp[0], nil
+	}
+	for _, endpoint := range tcp {
+		if endpoint.Name == "write" {
+			return endpoint, nil
+		}
+	}
+	return tcp[0], nil
 }
 
 func NewService() *Service {
