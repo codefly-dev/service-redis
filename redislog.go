@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	"github.com/codefly-dev/core/wool"
-	"github.com/mind-build/gortk"
+	"github.com/codefly-dev/gortk"
 )
 
 // redisLog parses the redis log prefix. Named captures pid/role/level/msg become
