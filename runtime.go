@@ -45,7 +45,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		Requirements: requirements,
 		ResolveEndpoints: func(ctx context.Context, endpoints []*basev0.Endpoint) error {
 			s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(endpoints)))
-			endpoint, err := resources.FindTCPEndpoint(ctx, endpoints)
+			endpoint, err := resolveServingTCPEndpoint(ctx, endpoints)
 			if err != nil {
 				return s.Wool.Wrapf(err, "cannot find TCP endpoint")
 			}

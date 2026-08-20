@@ -77,6 +77,51 @@ func TestRedisDockerCommandKeepsPasswordOutOfArgv(t *testing.T) {
 	}
 }
 
+func TestResolveServingTCPEndpointReadWriteReplicas(t *testing.T) {
+	endpoints := []*basev0.Endpoint{
+		{Name: "read", Api: "tcp"},
+		{Name: "write", Api: "tcp"},
+	}
+	endpoint, err := resolveServingTCPEndpoint(context.Background(), endpoints)
+	if err != nil {
+		t.Fatalf("resolveServingTCPEndpoint: %v", err)
+	}
+	if endpoint.Name != "write" {
+		t.Fatalf("selected endpoint = %q, want write", endpoint.Name)
+	}
+}
+
+func TestResolveServingTCPEndpointSingle(t *testing.T) {
+	endpoints := []*basev0.Endpoint{{Name: "tcp", Api: "tcp"}}
+	endpoint, err := resolveServingTCPEndpoint(context.Background(), endpoints)
+	if err != nil {
+		t.Fatalf("resolveServingTCPEndpoint: %v", err)
+	}
+	if endpoint.Name != "tcp" {
+		t.Fatalf("selected endpoint = %q, want tcp", endpoint.Name)
+	}
+}
+
+func TestResolveServingTCPEndpointFallsBackToFirst(t *testing.T) {
+	endpoints := []*basev0.Endpoint{
+		{Name: "read", Api: "tcp"},
+		{Name: "replica", Api: "tcp"},
+	}
+	endpoint, err := resolveServingTCPEndpoint(context.Background(), endpoints)
+	if err != nil {
+		t.Fatalf("resolveServingTCPEndpoint: %v", err)
+	}
+	if endpoint.Name != "read" {
+		t.Fatalf("selected endpoint = %q, want first declared (read)", endpoint.Name)
+	}
+}
+
+func TestResolveServingTCPEndpointNone(t *testing.T) {
+	if _, err := resolveServingTCPEndpoint(context.Background(), nil); err == nil {
+		t.Fatal("expected error when no tcp endpoint is present")
+	}
+}
+
 func TestSettings_YAMLRoundTrip(t *testing.T) {
 	src := []byte(`
 password: "hunter2"
