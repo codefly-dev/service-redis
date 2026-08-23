@@ -5,9 +5,6 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-
 jobs:
   release:
     uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
