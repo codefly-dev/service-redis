@@ -11,5 +11,4 @@ permissions:
 jobs:
   release:
     uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
-    secrets:
-      GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
