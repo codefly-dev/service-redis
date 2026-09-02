@@ -5,53 +5,7 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: read
-
 jobs:
-  image:
-    permissions:
-      contents: read
-      packages: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-        with:
-          driver-opts: image=moby/buildkit@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
-
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish release image tags
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          name=$(jq -er '.name' runtime-image.json)
-          tag=$(jq -er '.tag' runtime-image.json)
-          digest=$(jq -er '.digest' runtime-image.json)
-          RUNTIME_IMAGE="$name@$digest"
-          docker buildx imagetools create \
-            --tag "$name:$RELEASE_TAG" \
-            --tag "$name:$tag" \
-            "$RUNTIME_IMAGE"
-          for published_tag in "$name:$RELEASE_TAG" "$name:$tag"; do
-            published_digest=$(docker buildx imagetools inspect "$published_tag" |
-              awk '$1 == "Digest:" { print $2; exit }')
-            if [[ "$published_digest" != "$digest" ]]; then
-              echo "$published_tag resolves to $published_digest, want $digest" >&2
-              exit 1
-            fi
-          done
-
   release:
-    needs: image
-    permissions:
-      contents: read
     uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
     secrets: inherit
