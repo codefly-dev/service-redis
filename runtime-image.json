@@ -1,0 +1,5 @@
+{
+  "name": "ghcr.io/codefly-dev/service-redis",
+  "tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
+  "digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
+}

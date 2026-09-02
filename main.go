@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,10 +36,41 @@ type Settings struct {
 	RequirePass bool   `yaml:"require-pass"`
 }
 
-var image = &resources.DockerImage{
-	Name:   "redis",
-	Tag:    "8.8.0-alpine",
-	Digest: "sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005",
+// The managed image is the official redis Alpine image rebuilt with patched
+// OpenSSL (libcrypto3/libssl3 >= 3.5.8-r0). The nix runtime provisions redis
+// from nix/flake.nix, keeping both runtimes at parity.
+var image = shared.Must(parseRuntimeImageLock(runtimeImageLockJSON))
+
+type runtimeImageLock struct {
+	Name   string `json:"name"`
+	Tag    string `json:"tag"`
+	Digest string `json:"digest"`
+}
+
+func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
+	var lock runtimeImageLock
+	if err := json.Unmarshal(content, &lock); err != nil {
+		return nil, fmt.Errorf("parse runtime image lock: %w", err)
+	}
+	if lock.Name == "" {
+		return nil, fmt.Errorf("runtime image name is required")
+	}
+	if lock.Tag == "" {
+		return nil, fmt.Errorf("runtime image tag is required")
+	}
+	if lock.Digest == "" {
+		return nil, fmt.Errorf("runtime image digest is required")
+	}
+	algorithm, encoded, found := strings.Cut(lock.Digest, ":")
+	decoded, err := hex.DecodeString(encoded)
+	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("runtime image digest must be a sha256 digest")
+	}
+	return &resources.DockerImage{
+		Name:   lock.Name,
+		Tag:    lock.Tag,
+		Digest: lock.Digest,
+	}, nil
 }
 
 type Service struct {
@@ -183,6 +217,9 @@ func main() {
 
 //go:embed agent.codefly.yaml
 var infoFS embed.FS
+
+//go:embed runtime-image.json
+var runtimeImageLockJSON []byte
 
 //go:embed templates/agent
 var readmeFS embed.FS

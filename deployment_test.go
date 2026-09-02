@@ -98,7 +98,7 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")
 	for _, expected := range []string{
 		"automountServiceAccountToken: false",
-		"image: redis@" + image.Digest,
+		"image: " + image.FullName(),
 		`test -n "$REDIS_PASSWORD"`,
 		`exec redis-server --requirepass "$REDIS_PASSWORD"`,
 		"name: REDIS_PASSWORD",
