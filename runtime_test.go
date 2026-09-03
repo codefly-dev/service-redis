@@ -34,6 +34,16 @@ func TestWaitForReadyProbesNativeMappingUnderContainerContext(t *testing.T) {
 
 	nativePort := uint16(listener.Addr().(*net.TCPAddr).Port)
 
+	// A guaranteed-free port for the unreachable container instance: bind then
+	// release it, so nothing listens there. Derived independently of nativePort
+	// to avoid a uint16 wrap (nativePort+1 overflows to 0 when nativePort=65535).
+	deadListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen (dead port): %v", err)
+	}
+	deadPort := uint16(deadListener.Addr().(*net.TCPAddr).Port)
+	deadListener.Close()
+
 	rt := NewRuntime()
 	if err = rt.HeadlessLoad(context.Background(), &basev0.ServiceIdentity{
 		Workspace: "workspace",
@@ -51,7 +61,7 @@ func TestWaitForReadyProbesNativeMappingUnderContainerContext(t *testing.T) {
 	// that selected it would fail — only the native instance is reachable.
 	native := resources.NewNetworkInstance("localhost", nativePort)
 	native.Access = resources.NewNativeNetworkAccess()
-	container := resources.NewNetworkInstance("host.docker.internal", nativePort+1)
+	container := resources.NewNetworkInstance("host.docker.internal", deadPort)
 	container.Access = resources.NewContainerNetworkAccess()
 	rt.NetworkMappings = []*basev0.NetworkMapping{{
 		Endpoint:  rt.TcpEndpoint,
