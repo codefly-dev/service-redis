@@ -77,7 +77,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(w.NewError("network mapping is nil"))
 	}
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, s.Runtime.NetworkAccess())
+	// The redis container publishes its port to the agent host, and the port
+	// mapping plus readiness probe run in this host agent process. Always select
+	// the native mapping for those: a container mapping such as
+	// host.docker.internal shares the same port but is not a portable hostname on
+	// the host itself (notably on Linux and several macOS Docker backends), so
+	// probing it reports "redis is not ready" even though the container is up.
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, resources.NewNativeNetworkAccess())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -155,7 +161,9 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, s.Runtime.NetworkAccess())
+	// Probe over the native (localhost) mapping, matching the port published in
+	// Init — host.docker.internal is not reachable from this host agent process.
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, resources.NewNativeNetworkAccess())
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot find network instance")
 	}
