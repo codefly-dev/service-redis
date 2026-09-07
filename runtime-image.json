@@ -1,5 +1,5 @@
 {
   "name": "docker.io/codeflydev/redis",
-  "tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
-  "digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
+  "tag": "redis-8.8.0-openssl-3.5.8-r0-setpriv-2.41.6-r1-alpine3.23",
+  "digest": "sha256:0887ab9b5ee268aa087fc201c21be402077b996ae7df9d6b43151aa9f7ccb581"
 }

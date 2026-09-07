@@ -7,7 +7,8 @@ FROM ${REDIS_IMAGE} AS runtime
 
 RUN apk add --no-cache --upgrade \
     libcrypto3=3.5.8-r0 \
-    libssl3=3.5.8-r0 && \
+    libssl3=3.5.8-r0 \
+    setpriv=2.41.6-r1 && \
     rm -f /var/log/apk.log
 
 LABEL org.opencontainers.image.source="https://github.com/codefly-dev/service-redis"
