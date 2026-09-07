@@ -8,14 +8,14 @@ import (
 
 func TestParseRuntimeImageLock(t *testing.T) {
 	got, err := parseRuntimeImageLock([]byte(`{
-		"name": "ghcr.io/codefly-dev/service-redis",
+		"name": "docker.io/codeflydev/redis",
 		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
 		"digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
 	}`))
 	if err != nil {
 		t.Fatalf("parseRuntimeImageLock: %v", err)
 	}
-	const want = "ghcr.io/codefly-dev/service-redis@sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
+	const want = "docker.io/codeflydev/redis@sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
 	if got.FullName() != want {
 		t.Fatalf("FullName() = %q, want %q", got.FullName(), want)
 	}
@@ -26,7 +26,7 @@ func TestParseRuntimeImageLock(t *testing.T) {
 
 func TestParseRuntimeImageLockRejectsIncompleteReference(t *testing.T) {
 	_, err := parseRuntimeImageLock([]byte(`{
-		"name": "ghcr.io/codefly-dev/service-redis",
+		"name": "docker.io/codeflydev/redis",
 		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23"
 	}`))
 	if err == nil || err.Error() != "runtime image digest is required" {
@@ -36,7 +36,7 @@ func TestParseRuntimeImageLockRejectsIncompleteReference(t *testing.T) {
 
 func TestParseRuntimeImageLockRejectsNonSHA256Digest(t *testing.T) {
 	_, err := parseRuntimeImageLock([]byte(`{
-		"name": "ghcr.io/codefly-dev/service-redis",
+		"name": "docker.io/codeflydev/redis",
 		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
 		"digest": "sha512:deadbeef"
 	}`))
@@ -59,9 +59,9 @@ func TestDefaultImageMatchesRuntimeImageLock(t *testing.T) {
 	}
 }
 
-func TestManagedImageIsPatchedGHCRReference(t *testing.T) {
-	if image.Name != "ghcr.io/codefly-dev/service-redis" {
-		t.Fatalf("image.Name = %q, want ghcr.io/codefly-dev/service-redis", image.Name)
+func TestManagedImageIsPatchedDockerHubReference(t *testing.T) {
+	if image.Name != "docker.io/codeflydev/redis" {
+		t.Fatalf("image.Name = %q, want docker.io/codeflydev/redis", image.Name)
 	}
 	if !strings.HasPrefix(image.Digest, "sha256:") {
 		t.Fatalf("image.Digest = %q, want sha256-pinned reference", image.Digest)
