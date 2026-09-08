@@ -78,9 +78,10 @@ jobs:
             image --quiet --format table --severity HIGH,CRITICAL \
             --exit-code 1 --input /image.tar
 
-      # The ghcr package is not writable by GITHUB_TOKEN, so CI verifies that the
-      # pinned inputs reproduce the committed digest instead of publishing; the
-      # multi-arch image is pushed to ghcr out-of-band from these same inputs.
+      # CI has no registry push credentials, so it verifies that the pinned
+      # inputs reproduce the committed digest instead of publishing; the
+      # multi-arch image is pushed to Docker Hub out-of-band from these same
+      # inputs.
       - name: Verify runtime image digest is reproducible
         shell: bash
         run: |
@@ -96,5 +97,25 @@ jobs:
           built=$(jq -er '."containerimage.digest"' /tmp/runtime-meta.json)
           if [[ "$built" != "$expected" ]]; then
             echo "built digest $built does not match runtime-image.json $expected" >&2
+            exit 1
+          fi
+
+      # Anonymous consumers (composition CI) pull the pinned runtime image
+      # without a registry login. A pin bumped in the repo but never pushed to
+      # the public registry reproduces cleanly above yet 401/404s for everyone
+      # else, and nothing here pulls it — so the gap stays green until a
+      # downstream bump trips over it. Fail loud instead.
+      - name: Verify runtime image is publicly pullable
+        shell: bash
+        env:
+          DOCKER_CONFIG: /tmp/anon-docker-config
+        run: |
+          set -euo pipefail
+          ref=$(jq -er '.name + "@" + .digest' runtime-image.json)
+          mkdir -p "$DOCKER_CONFIG"
+          echo '{}' > "$DOCKER_CONFIG/config.json"
+          if ! docker manifest inspect "$ref" >/dev/null; then
+            echo "pinned runtime image $ref is not anonymously pullable" >&2
+            echo "publish it to the public registry before pinning the digest" >&2
             exit 1
           fi
