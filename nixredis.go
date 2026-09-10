@@ -9,7 +9,7 @@ package main
 // materializes `redis` from the embedded flake (no system install required),
 // and this file drives the native lifecycle — launch `redis-server` bound to
 // the agent-assigned port on loopback (with the configured password) and wait
-// for it to answer PING.
+// for it to answer an authenticated PING.
 //
 // Both runtimes serve on the same assigned port, so the rest of the agent
 // (WaitForReady, connection strings) is unchanged.
@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -369,7 +368,7 @@ func writeFileAtomic(path string, contents []byte, perm os.FileMode) error {
 }
 
 // Init materializes the nix env, locates redis-server, launches it bound to the
-// assigned port, and waits until it answers PING.
+// assigned port, and waits until it answers an authenticated PING.
 //
 // A failed Init releases everything it acquired, including the runtime-root
 // claim taken by newNixRedis. The caller drops the *nixRedis on error and can
@@ -586,10 +585,13 @@ func (n *nixRedis) serverArgs() []string {
 	return []string{n.configPath}
 }
 
-// waitReady polls the redis port with a PING until it answers, giving up when
-// the server dies, when the caller cancels, or when the readiness budget runs
-// out. A server that has already exited is never ready: whatever answers on the
-// port after that belongs to someone else.
+// waitReady polls the redis port until the server completes an authenticated
+// PING, giving up when the server dies, when the caller cancels, or when the
+// readiness budget runs out. The configured password is required: a passworded
+// server answers an unauthenticated PING with "-NOAUTH …", which proves the
+// socket is open but not that the projected credentials work. A server that has
+// already exited is never ready: whatever answers on the port after that belongs
+// to someone else.
 func (n *nixRedis) waitReady(ctx context.Context) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", n.port)
 	ctx, cancel := context.WithTimeout(ctx, redisReadyTimeout)
@@ -599,12 +601,18 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 		if exitErr, exited := n.exited(); exited {
 			return redisExitedBeforeReady(exitErr)
 		}
-		lastErr = n.probe(ctx, addr)
+		lastErr = probeRedis(ctx, addr, n.password)
 		if lastErr == nil {
 			if exitErr, exited := n.exited(); exited {
 				return redisExitedBeforeReady(exitErr)
 			}
 			return nil
+		}
+		// Bad credentials, or a peer that does not speak RESP: no amount of
+		// waiting turns either into a redis this agent can drive.
+		var probeErr *redisProbeError
+		if errors.As(lastErr, &probeErr) && !probeErr.retryable {
+			return lastErr
 		}
 		n.mu.Lock()
 		exit := n.serverExit
@@ -620,27 +628,6 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 		case <-time.After(redisProbeInterval):
 		}
 	}
-}
-
-// probe dials the server and sends a PING. A passworded server replies
-// "-NOAUTH …" to an unauthenticated PING, which still proves it is up and
-// accepting connections — so any reply counts as ready.
-func (n *nixRedis) probe(ctx context.Context, addr string) error {
-	dialer := net.Dialer{Timeout: 1 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-	if _, err = conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
-		return err
-	}
-	buf := make([]byte, 16)
-	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-	if _, err = conn.Read(buf); err != nil {
-		return err
-	}
-	return nil
 }
 
 // exited reports the process's terminal result if it has already exited,
