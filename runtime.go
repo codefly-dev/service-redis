@@ -97,15 +97,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	w := s.Wool.In("runtime::init")
 
-	// Init re-establishes this service, so anything a previous Init left running
-	// has to go first. Adopting a second handle over a live one drops the only
-	// reference to that process: it keeps the assigned port, the new server
-	// cannot bind, and nothing is left that can stop either of them. Releasing
-	// before any resolution work means a failed Init also leaves nothing behind.
-	if err := s.releaseNativeRuntime(ctx); err != nil {
-		return s.Runtime.InitError(err)
-	}
-
 	s.NetworkMappings = req.ProposedNetworkMappings
 
 	configuration := req.GetConfiguration()
@@ -160,6 +151,21 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	// (e.g. a host without Docker). Same port, so WaitForReady is unchanged.
 	if rc := req.GetRuntimeContext(); rc != nil && rc.Kind == resources.RuntimeContextNix {
 		s.Infof("using nix runtime for redis on port %d", instance.Port)
+		// Release whatever a previous Init left running before building its
+		// replacement. Adopting a second handle over a live one drops the only
+		// reference to that process: it keeps the assigned port, the new server
+		// cannot bind, and nothing is left that can stop either of them. It also
+		// still holds the exclusive claim on the runtime root, so a same-scope
+		// re-Init would wait out claimRuntimeRoot and then be refused as if a
+		// foreign invocation owned it.
+		//
+		// This is the point Init commits to replacing the server, and not a line
+		// earlier: a request that fails validation must leave a working redis
+		// working. Ownership is retained across such a failure, so the server is
+		// still reachable by Stop and Destroy — it is not orphaned by surviving.
+		if errRelease := s.releaseNativeRuntime(ctx); errRelease != nil {
+			return s.Runtime.InitError(errRelease)
+		}
 		nixr, errNix := newNixRedis(ctx, redisStateKey(s.Location, s.Environment.GetNamingScope()), uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
@@ -173,7 +179,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			return s.Runtime.InitError(errNix)
 		}
 	} else {
-		// Docker: container redis on 6379, mapped to the assigned port.
+		// Docker: container redis on 6379, mapped to the assigned port. A caller
+		// that switches backends between Inits still has to have its native
+		// server released — the docker container would otherwise be a second
+		// redis contending for the same port.
+		if errRelease := s.releaseNativeRuntime(ctx); errRelease != nil {
+			return s.Runtime.InitError(errRelease)
+		}
 		runner, errDocker := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
 		if errDocker != nil {
 			return s.Runtime.InitError(errDocker)

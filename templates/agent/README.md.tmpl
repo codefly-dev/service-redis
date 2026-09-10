@@ -21,7 +21,7 @@ version only ever moves when that lock does.
 | operation | execution resources | data |
 | --- | --- | --- |
 | Stop (native) | released — the redis process is terminated and the port freed | retained: the dataset is written to the data directory on shutdown and reloaded by the next Init |
-| Stop (native) with `keep-running: true` | retained — the server stays up for reuse | retained, in memory |
+| Stop (native) with `keep-running: true` | retained — the server stays up for reuse | retained; the server keeps serving it and keeps snapshotting on its save point |
 | Stop (Docker) | retained — the container stays up for reuse | retained, in the running container |
 | Destroy (native) | released | retained on disk, same as Stop |
 | Destroy (Docker) | released; the container is removed | **discarded** — the container has no volume, so removing it removes its data |

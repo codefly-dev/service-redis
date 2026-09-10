@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +28,36 @@ func newLoadedRuntime(t *testing.T) *Runtime {
 	}
 	rt.Runtime.WithContext(resources.NewRuntimeContextNix())
 	return rt
+}
+
+// nixInitRequest is an Init request that resolves: a native mapping for the
+// runtime's own TCP endpoint. Tests that need Init to get past validation and
+// reach the backend it is about to build use this.
+func nixInitRequest(t *testing.T, rt *Runtime, port uint16) *runtimev0.InitRequest {
+	t.Helper()
+	rt.TcpEndpoint = &basev0.Endpoint{Name: "tcp", Module: "module", Service: "redis", Api: "tcp"}
+	native := resources.NewNetworkInstance("localhost", port)
+	native.Access = resources.NewNativeNetworkAccess()
+	return &runtimev0.InitRequest{
+		RuntimeContext: resources.NewRuntimeContextNix(),
+		ProposedNetworkMappings: []*basev0.NetworkMapping{{
+			Endpoint:  rt.TcpEndpoint,
+			Instances: []*basev0.NetworkInstance{native},
+		}},
+	}
+}
+
+// breakRuntimeRoot makes newNixRedis fail on its first filesystem call, which
+// is the step immediately after Init releases the runtime it already owns.
+// Nothing on that path reaches nix, so the failure is identical on every host.
+func breakRuntimeRoot(t *testing.T) {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", blocker)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(blocker, "cache"))
 }
 
 // startedNativeRuntime hands back a runtime that owns a running native redis,
@@ -206,14 +238,15 @@ func TestRuntimeInitReleasesTheRuntimeItAlreadyOwns(t *testing.T) {
 	rt, n, port := startedNativeRuntime(t)
 	pid := ownedPID(t, n)
 
-	resp, err := rt.Init(context.Background(), &runtimev0.InitRequest{
-		RuntimeContext: resources.NewRuntimeContextNix(),
-	})
+	// Init gets a request it can resolve, so it commits to building a
+	// replacement; constructing that replacement then fails.
+	breakRuntimeRoot(t)
+	resp, err := rt.Init(context.Background(), nixInitRequest(t, rt, port))
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
-		t.Fatalf("Init status = %v, want ERROR on empty network mappings", state)
+		t.Fatalf("Init status = %v, want ERROR", state)
 	}
 	requireProcessGone(t, pid)
 	requirePortFree(t, port)
@@ -229,9 +262,7 @@ func TestRuntimeInitKeepsOwnershipWhenReleaseFails(t *testing.T) {
 	rt := newLoadedRuntime(t)
 	rt.setNativeRuntime(&nixRedis{port: 6379, proc: stubborn{}})
 
-	resp, err := rt.Init(context.Background(), &runtimev0.InitRequest{
-		RuntimeContext: resources.NewRuntimeContextNix(),
-	})
+	resp, err := rt.Init(context.Background(), nixInitRequest(t, rt, 6379))
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -317,5 +348,64 @@ func TestRuntimeConcurrentStopAndDestroyReleaseOnce(t *testing.T) {
 	requirePortFree(t, port)
 	if rt.nativeRuntime() != nil {
 		t.Error("concurrent teardown left ownership behind")
+	}
+}
+
+// TestRuntimeInitKeepsAWorkingRedisWhenTheRequestIsInvalid: releasing the
+// incumbent is how Init avoids owning two servers, but it must not be the
+// first thing Init does. A request that never resolves is a request that was
+// never going to produce a replacement, and answering it by killing the redis
+// that is currently serving turns a rejected call into an outage.
+func TestRuntimeInitKeepsAWorkingRedisWhenTheRequestIsInvalid(t *testing.T) {
+	rt, n, port := startedNativeRuntime(t)
+	pid := ownedPID(t, n)
+
+	// No network mappings: Init cannot resolve an endpoint, so it never reaches
+	// the point of building anything.
+	resp, err := rt.Init(context.Background(), &runtimev0.InitRequest{
+		RuntimeContext: resources.NewRuntimeContextNix(),
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
+		t.Fatalf("Init status = %v, want ERROR", state)
+	}
+	if !processAlive(pid) {
+		t.Fatal("a request that failed validation killed the redis that was serving")
+	}
+	if rt.nativeRuntime() == nil {
+		t.Fatal("Init gave up ownership of a server it left running")
+	}
+	requireRedisAnswers(t, port)
+
+	// Ownership survived, so the server is still reachable — prove it rather
+	// than leaking it.
+	if _, err = rt.Stop(context.Background(), &runtimev0.StopRequest{}); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	requireProcessGone(t, pid)
+}
+
+// TestRuntimeDestroyReleasesRedisEvenWhenKeepRunningIsSet: keep-running is an
+// opt-out from Stop releasing execution resources, not a way to make a server
+// outlive Destroy. Honouring it here would strand the process permanently,
+// since Destroy is the last call anything makes.
+func TestRuntimeDestroyReleasesRedisEvenWhenKeepRunningIsSet(t *testing.T) {
+	rt, n, port := startedNativeRuntime(t)
+	pid := ownedPID(t, n)
+	rt.Settings.KeepRunning = true
+
+	resp, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if state := resp.GetStatus().GetState(); state != runtimev0.DestroyStatus_SUCCESS {
+		t.Fatalf("Destroy status = %v (%s)", state, resp.GetStatus().GetMessage())
+	}
+	requireProcessGone(t, pid)
+	requirePortFree(t, port)
+	if rt.nativeRuntime() != nil {
+		t.Error("Destroy kept ownership of a runtime it released")
 	}
 }
