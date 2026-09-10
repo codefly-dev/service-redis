@@ -26,17 +26,20 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
+	"github.com/codefly-dev/core/wool"
 	"github.com/gofrs/flock"
 )
 
@@ -61,10 +64,10 @@ type nixRedis struct {
 	// returns and that ctx is cancelled. Cancelled only by Stop.
 	serverCtx    context.Context
 	serverCancel context.CancelFunc
-	// binDir is the absolute nix store bin dir holding redis-server. Invoking it
-	// by absolute path runs the nix-built redis even if a system redis shadows
-	// PATH.
-	binDir string
+	// serverPath is the absolute redis-server the locked devShell exports.
+	// Invoking it by absolute path runs the nix-provisioned redis even if a
+	// system redis shadows PATH.
+	serverPath string
 	// owner is the exclusive lock this invocation holds on runtimeRoot for the
 	// whole session. It is what makes the config and data below runtimeRoot
 	// *this* invocation's resources: a second invocation that would land on the
@@ -351,9 +354,6 @@ func (n *nixRedis) Init(ctx context.Context) (err error) {
 	if err := n.initSharedEnv(ctx); err != nil {
 		return err
 	}
-	if err := n.resolveStore(); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
 		return fmt.Errorf("create redis data dir: %w", err)
 	}
@@ -366,31 +366,103 @@ func (n *nixRedis) Init(ctx context.Context) (err error) {
 	return n.waitReady(ctx)
 }
 
-// initSharedEnv materializes the shared nix env under the shared lock. The
-// lock covers the shared root only — the per-session config and data below
-// runtimeRoot are never held by it.
+// initSharedEnv materializes the shared nix env and resolves redis-server out
+// of it, both under the shared lock. The lock covers the shared root only — the
+// per-session config and data below runtimeRoot are never held by it. Resolving
+// here rather than after is what keeps every evaluation of the shared flake
+// serialized: resolveStore evaluates it too.
 func (n *nixRedis) initSharedEnv(ctx context.Context) error {
 	return withSharedNixLock(ctx, n.sharedNixRoot, n.out, func() error {
 		if err := n.env.Init(ctx); err != nil {
 			return fmt.Errorf("materialize nix redis env: %w", err)
 		}
-		return nil
+		return n.resolveStore(ctx)
 	})
 }
 
-// resolveStore locates the nix-store redis-server binary by absolute path —
-// rather than a bare command on PATH — so we run the nix-built redis even if a
-// system redis shadows PATH.
-func (n *nixRedis) resolveStore() error {
-	matches, err := filepath.Glob("/nix/store/*-redis-*/bin/redis-server")
+// resolveStore selects redis-server from the PATH the locked devShell exports.
+// Anything else — scanning /nix/store, or a bare command name — lets an
+// unrelated redis derivation or a host install decide which server runs.
+//
+// The selection is deliberately not cached on disk. NixEnvironment already owns
+// and caches the materialization this reads; a second cache, keyed on a second
+// copy of the flake fingerprint, is one more thing that can disagree with the
+// environment redis actually runs in — and it would disagree silently.
+func (n *nixRedis) resolveStore(ctx context.Context) error {
+	w := wool.Get(ctx).In("nixRedis.resolveStore")
+	devShellPath, err := n.devShellPath(ctx)
 	if err != nil {
-		return fmt.Errorf("glob nix redis: %w", err)
+		return err
 	}
-	if len(matches) == 0 {
-		return fmt.Errorf("no nix redis with bin/redis-server found in /nix/store (materialization may have failed)")
+	server, err := lookupExecutable("redis-server", devShellPath)
+	if err != nil {
+		return fmt.Errorf("locked nix environment in %s does not provide redis-server: %w", n.flakeDir, err)
 	}
-	n.binDir = filepath.Dir(matches[0])
+	n.serverPath = server
+	w.Info("resolved redis-server from locked nix environment", wool.Field("server", server))
 	return nil
+}
+
+// devShellPath returns the PATH the locked devShell exports. This is the same
+// value the codefly nix runner resolves binaries against, so the server we pick
+// here is the one the flake provisions.
+func (n *nixRedis) devShellPath(ctx context.Context) (string, error) {
+	dir := n.flakeDir
+	if abs, absErr := filepath.Abs(dir); absErr == nil {
+		dir = abs
+	}
+	// #nosec G204
+	cmd := exec.CommandContext(ctx, "nix", "--extra-experimental-features", "nix-command flakes",
+		"print-dev-env", "--json", "path:"+dir)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", fmt.Errorf("nix print-dev-env failed: %s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
+		}
+		return "", fmt.Errorf("nix print-dev-env failed: %w", err)
+	}
+	var payload struct {
+		Variables map[string]struct {
+			// Non-scalar entries (bash arrays, functions) carry a value shape
+			// that is not a string, so PATH is decoded on its own below.
+			Value json.RawMessage `json:"value"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return "", fmt.Errorf("parse nix print-dev-env json: %w", err)
+	}
+	// A missing, non-string, or empty PATH all mean the same thing: this
+	// devShell cannot say where redis lives.
+	var devShellPath string
+	if entry, ok := payload.Variables["PATH"]; ok {
+		_ = json.Unmarshal(entry.Value, &devShellPath)
+	}
+	if devShellPath == "" {
+		return "", fmt.Errorf("nix devShell for %s exports no PATH", dir)
+	}
+	return devShellPath, nil
+}
+
+// lookupExecutable finds name in pathValue. Empty PATH entries mean "current
+// directory" to a shell; they are skipped because the working directory is not
+// part of the locked environment.
+func lookupExecutable(name string, pathValue string) (string, error) {
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if isExecutable(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%q is not on the devShell PATH", name)
+}
+
+func isExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
 }
 
 // writeConfig keeps the password out of process argv (and therefore ps/process
@@ -419,7 +491,7 @@ func (n *nixRedis) writeConfig() error {
 
 // startServer launches redis-server with only the private config path in argv.
 func (n *nixRedis) startServer(ctx context.Context) error {
-	proc, err := n.env.NewProcess(filepath.Join(n.binDir, "redis-server"), n.serverArgs()...)
+	proc, err := n.env.NewProcess(n.serverPath, n.serverArgs()...)
 	if err != nil {
 		return err
 	}

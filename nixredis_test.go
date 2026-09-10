@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -329,5 +332,230 @@ func TestWriteRedisConfigReplacesAtomicallyAndStaysPrivate(t *testing.T) {
 		if entry.Name() != "redis.conf" {
 			t.Fatalf("atomic write left %q behind", entry.Name())
 		}
+	}
+}
+
+// resolveHarness stands in for a machine that has several redis derivations in
+// its store and a redis of its own on PATH: `nix` is a stub printing a devShell
+// environment the test controls, so resolution can only come out right if it
+// follows the locked environment rather than the store or the ambient PATH.
+type resolveHarness struct {
+	t        *testing.T
+	flakeDir string
+	devEnv   string
+	argsFile string
+	store    string
+}
+
+func newResolveHarness(t *testing.T) (*nixRedis, *resolveHarness) {
+	t.Helper()
+	root := t.TempDir()
+	h := &resolveHarness{
+		t:        t,
+		flakeDir: filepath.Join(root, "nix"),
+		devEnv:   filepath.Join(root, "dev-env.json"),
+		argsFile: filepath.Join(root, "nix-args"),
+		store:    filepath.Join(root, "store"),
+	}
+
+	if err := os.MkdirAll(h.flakeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"flake.nix", "flake.lock"} {
+		if err := os.WriteFile(filepath.Join(h.flakeDir, name), []byte("original "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Two redis derivations, plus a host install. The 7.0.15 one sorts first and
+	// is on the ambient PATH; only 8.2.1 is in the locked devShell.
+	writeExecutable(t, h.serverIn("aaa-redis-7.0.15"), "#!/bin/sh\necho 'Redis server v=7.0.15'\n")
+	writeExecutable(t, h.serverIn("zzz-redis-8.2.1"), "#!/bin/sh\necho 'Redis server v=8.2.1'\n")
+	hostBin := filepath.Join(root, "host", "bin")
+	writeExecutable(t, filepath.Join(hostBin, "redis-server"), "#!/bin/sh\necho 'Redis server v=host'\n")
+
+	nixBin := filepath.Join(root, "nix-stub")
+	writeExecutable(t, filepath.Join(nixBin, "nix"),
+		"#!/bin/sh\nprintf '%s\\n' \"$@\" > "+strconv.Quote(h.argsFile)+"\ncat "+strconv.Quote(h.devEnv)+"\n")
+
+	// The stubbed nix, a host redis, and the earlier-sorting derivation all come
+	// before the rest of the machine's PATH.
+	t.Setenv("PATH", strings.Join([]string{nixBin, hostBin, h.binIn("aaa-redis-7.0.15"), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	h.lockedTo("zzz-redis-8.2.1")
+
+	return &nixRedis{flakeDir: h.flakeDir}, h
+}
+
+func (h *resolveHarness) binIn(derivation string) string {
+	return filepath.Join(h.store, derivation, "bin")
+}
+
+func (h *resolveHarness) serverIn(derivation string) string {
+	return filepath.Join(h.binIn(derivation), "redis-server")
+}
+
+// lockedTo makes the stubbed devShell export the given derivation's bin dir.
+func (h *resolveHarness) lockedTo(derivation string) {
+	h.t.Helper()
+	h.exportPath(h.binIn(derivation))
+}
+
+func (h *resolveHarness) exportPath(dirs ...string) {
+	h.t.Helper()
+	// The array entry mirrors the non-scalar variables real `nix print-dev-env`
+	// emits alongside PATH.
+	payload := map[string]any{
+		"variables": map[string]any{
+			"PATH":        map[string]any{"type": "exported", "value": strings.Join(dirs, string(os.PathListSeparator))},
+			"BASH_SOURCE": map[string]any{"type": "array", "value": []string{"a", "b"}},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(h.devEnv, data, 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// relock rewrites the materialized lock, as a flake bump would.
+func (h *resolveHarness) relock() {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(h.flakeDir, "flake.lock"), []byte("bumped lock"), 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func writeExecutable(t *testing.T, path string, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serverVersion(t *testing.T, server string) string {
+	t.Helper()
+	out, err := exec.Command(server, "--version").Output()
+	if err != nil {
+		t.Fatalf("run %s: %v", server, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestResolveStorePicksLockedRedisOverStoreOrderAndHostPath(t *testing.T) {
+	n, h := newResolveHarness(t)
+
+	if err := n.resolveStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := h.serverIn("zzz-redis-8.2.1"); n.serverPath != want {
+		t.Fatalf("resolved %q, want the locked %q", n.serverPath, want)
+	}
+	if got, want := serverVersion(t, n.serverPath), "Redis server v=8.2.1"; got != want {
+		t.Fatalf("selected server reports %q, want %q", got, want)
+	}
+	args, err := os.ReadFile(h.argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flakeRef := "path:" + h.flakeDir; !strings.Contains(string(args), flakeRef) {
+		t.Fatalf("nix was not asked about %q:\n%s", flakeRef, args)
+	}
+}
+
+// TestResolveStoreFollowsTheLiveDevShell is the regression cover for serving a
+// remembered resolution: after a lock bump moves redis to another derivation,
+// the next Init must run the new one, not the one a previous Init picked.
+func TestResolveStoreFollowsTheLiveDevShell(t *testing.T) {
+	n, h := newResolveHarness(t)
+	if err := n.resolveStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := h.serverIn("zzz-redis-8.2.1"); n.serverPath != want {
+		t.Fatalf("resolved %q, want %q", n.serverPath, want)
+	}
+
+	h.relock()
+	h.lockedTo("aaa-redis-7.0.15")
+	if err := n.resolveStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := h.serverIn("aaa-redis-7.0.15"); n.serverPath != want {
+		t.Fatalf("resolved %q after the lock moved redis, want %q", n.serverPath, want)
+	}
+	if got, want := serverVersion(t, n.serverPath), "Redis server v=7.0.15"; got != want {
+		t.Fatalf("selected server reports %q, want %q", got, want)
+	}
+}
+
+func TestResolveStoreFailsWhenLockedEnvironmentHasNoRedis(t *testing.T) {
+	n, h := newResolveHarness(t)
+	h.exportPath(filepath.Join(h.store, "empty", "bin"))
+
+	err := n.resolveStore(context.Background())
+	if err == nil {
+		t.Fatalf("resolution succeeded with %q, want a failure", n.serverPath)
+	}
+	if !strings.Contains(err.Error(), "redis-server") {
+		t.Fatalf("error does not name the missing binary: %v", err)
+	}
+	if n.serverPath != "" {
+		t.Fatalf("fell back to %q", n.serverPath)
+	}
+}
+
+// nixDevelopRedisServer asks `nix develop` — a different mechanism from the
+// print-dev-env path under test — which redis-server the devShell hands you.
+func nixDevelopRedisServer(t *testing.T, flakeDir string) string {
+	t.Helper()
+	out, err := exec.Command("nix", "--extra-experimental-features", "nix-command flakes",
+		"develop", "path:"+flakeDir, "--command", "sh", "-c", "command -v redis-server").Output()
+	if err != nil {
+		t.Fatalf("nix develop: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestResolveStoreAgainstRealNix exercises the whole runtime path — real flake,
+// real `nix print-dev-env`, real redis binary — on machines that have nix. The
+// multi-derivation ordering case is covered by the stubbed tests above, which
+// can stage two redis derivations; here the equivalent guarantee is that the
+// selection equals what the devShell independently reports.
+func TestResolveStoreAgainstRealNix(t *testing.T) {
+	if _, err := exec.LookPath("nix"); err != nil {
+		t.Skip("nix is not installed")
+	}
+	ctx := context.Background()
+	n, err := newNixRedis(ctx, redisStateKey(t.TempDir(), "inv"+uniqueScopeSuffix(t)), 16379, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// newNixRedis claims this invocation's runtime root and populates it outside
+	// any t.TempDir(). Cleanup is LIFO, so Stop — which releases the claim —
+	// runs before the removal. The shared nix root is deliberately left alone:
+	// it is reused by every invocation on this host, including the developer's.
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(n.configPath)) })
+	t.Cleanup(func() { _ = n.Stop(context.Background()) })
+
+	want := nixDevelopRedisServer(t, n.flakeDir)
+
+	// A host redis ahead of everything on PATH must not win.
+	decoy := filepath.Join(t.TempDir(), "bin")
+	writeExecutable(t, filepath.Join(decoy, "redis-server"), "#!/bin/sh\necho 'Redis server v=decoy'\n")
+	t.Setenv("PATH", decoy+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Resolution happens inside initSharedEnv, under the shared nix lock.
+	if err := n.initSharedEnv(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n.serverPath != want {
+		t.Fatalf("resolved %q, want the devShell's own %q", n.serverPath, want)
+	}
+	if version := serverVersion(t, n.serverPath); !strings.Contains(version, "Redis server v=") {
+		t.Fatalf("selected server reports %q", version)
 	}
 }
