@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"sync"
 	"time"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -24,7 +25,12 @@ type Runtime struct {
 
 	// nixRuntime is set instead of runnerEnvironment when the caller requests
 	// RuntimeContextNix — redis runs natively from a nix-provisioned binary.
-	nixRuntime *nixRedis
+	// It is this invocation's ownership record for that process: whoever holds
+	// it is responsible for stopping it, and it is guarded because the
+	// supervision goroutine armed by Start reads it while Stop and Destroy
+	// clear it.
+	nixRuntime   *nixRedis
+	nixRuntimeMu sync.Mutex
 
 	redisPort uint16
 }
@@ -35,6 +41,18 @@ func NewRuntime() *Runtime {
 		DefaultRuntime: services.NewDefaultRuntime(service.Runtime),
 		Service:        service,
 	}
+}
+
+func (s *Runtime) setNativeRuntime(nixr *nixRedis) {
+	s.nixRuntimeMu.Lock()
+	defer s.nixRuntimeMu.Unlock()
+	s.nixRuntime = nixr
+}
+
+func (s *Runtime) nativeRuntime() *nixRedis {
+	s.nixRuntimeMu.Lock()
+	defer s.nixRuntimeMu.Unlock()
+	return s.nixRuntime
 }
 
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
@@ -122,10 +140,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}
+		// Take ownership before Init can spawn anything. A handle retained only
+		// on success leaves a failed Init's server running with nothing left to
+		// reach it; retaining it here means a failed rollback still has an owner
+		// that Stop and Destroy can retry.
+		s.setNativeRuntime(nixr)
 		if errNix = nixr.Init(ctx); errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}
-		s.nixRuntime = nixr
 	} else {
 		// Docker: container redis on 6379, mapped to the assigned port.
 		runner, errDocker := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
@@ -211,11 +233,66 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	s.Wool.Debug("start done")
-	return s.Runtime.StartResponse()
+	// Commit STARTED before arming supervision. StartResponse and
+	// MarkRunnerExited write the same status under the same lock, so ordering is
+	// by wall clock: arming first would let a death already buffered in the exit
+	// channel flip the status to ERROR, and this response would then clobber it
+	// back to STARTED — masking exactly the death supervision exists to report.
+	resp, err := s.Runtime.StartResponse()
+	if err != nil {
+		return resp, err
+	}
+	// Docker redis is supervised by the container engine; the native process has
+	// no supervisor but this one.
+	if nixr := s.nativeRuntime(); nixr != nil {
+		s.superviseNative(nixr)
+	}
+	return resp, nil
 }
 
+// superviseNative reports a native redis that dies without being stopped, so
+// the orchestrator observes a failed start instead of leaving dependents to
+// spin on connection refused.
+func (s *Runtime) superviseNative(nixr *nixRedis) {
+	nixr.Supervise(func(err error) {
+		// A handle the runtime no longer owns belongs to a superseded
+		// generation — a re-Init replaced it — and its exit says nothing about
+		// the redis serving now.
+		if s.nativeRuntime() != nixr {
+			return
+		}
+		if err != nil {
+			s.Wool.Error("native redis exited unexpectedly", wool.ErrField(err))
+		} else {
+			s.Wool.Error("native redis exited unexpectedly (clean exit, not stopped)")
+		}
+		s.Runtime.MarkRunnerExited(err)
+	})
+}
+
+// Stop releases the execution resources this invocation owns and retains its
+// data. For the native runtime that means terminating the redis process and
+// freeing the assigned port, leaving the data directory and config in place for
+// the next Init; a runtime that never ran Init owns nothing and stops nothing.
+//
+// The Docker runtime keeps its container running across Stop, as it always has.
+// Changing that is a policy change about warm reuse, not part of owning the
+// native process, and it needs its own opt-in rather than arriving as a side
+// effect here.
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	if nixr := s.nativeRuntime(); nixr != nil {
+		if err := nixr.Stop(ctx); err != nil {
+			// Keep the handle. The process may still be alive, and dropping the
+			// only reference to it is how it becomes an orphan: Destroy retries.
+			return s.Runtime.StopError(err)
+		}
+		s.setNativeRuntime(nil)
+		s.Wool.Debug("stopped native redis: port released, data retained")
+		return s.Runtime.StopResponse()
+	}
 
 	s.Wool.Debug("nothing to stop: keep environment alive")
 
@@ -229,10 +306,20 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	s.Wool.Debug("Destroying")
 
 	// Nix runtime: terminate the native redis process; there is no container.
-	if s.nixRuntime != nil {
-		if err := s.nixRuntime.Stop(ctx); err != nil {
+	// Stopping an already-stopped handle is a no-op, and a handle from a failed
+	// Init still points at whatever that Init managed to spawn, so this is the
+	// retry path for both.
+	if nixr := s.nativeRuntime(); nixr != nil {
+		if err := nixr.Stop(ctx); err != nil {
 			return s.Runtime.DestroyError(err)
 		}
+		s.setNativeRuntime(nil)
+		return s.Runtime.DestroyResponse()
+	}
+	// A native invocation has no container to remove, and reaching for one would
+	// demand a docker daemon from a host that was very likely chosen for not
+	// having one.
+	if s.Runtime.IsNixRuntime() {
 		return s.Runtime.DestroyResponse()
 	}
 

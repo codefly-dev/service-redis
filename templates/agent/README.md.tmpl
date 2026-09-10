@@ -15,3 +15,16 @@ image (`runtime-image.json`). The Docker-free (nix) runtime serves the Redis
 that `nix/flake.lock` pins: `redis-server` is taken from the PATH the locked
 devShell exports, never from a `/nix/store` scan or the host's PATH, so the
 version only ever moves when that lock does.
+
+## Lifecycle
+
+| operation | execution resources | data |
+| --- | --- | --- |
+| Stop (native) | released — the redis process is terminated and the port freed | retained |
+| Stop (Docker) | retained — the container stays up for reuse | retained |
+| Destroy (native) | released | retained |
+| Destroy (Docker) | released; the container is removed | retained |
+
+No operation deletes the data directory or the generated config. If the native
+redis process dies on its own, the agent reports the service as failed rather
+than continuing to advertise it as started.
