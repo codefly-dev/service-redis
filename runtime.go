@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"net"
 	"sync"
-	"time"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 
@@ -233,28 +231,19 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	address := instance.Address
 	s.Wool.Debug("waiting for redis to be ready", wool.Field("address", address))
 
-	maxRetry := 10
-	for retry := 0; retry < maxRetry; retry++ {
-		conn, err := net.DialTimeout("tcp", address, 2*time.Second)
-		if err == nil {
-			// Send PING command
-			_, err = conn.Write([]byte("*1\r\n$4\r\nPING\r\n"))
-			if err == nil {
-				buf := make([]byte, 64)
-				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-				n, readErr := conn.Read(buf)
-				conn.Close()
-				if readErr == nil && n > 0 {
-					s.Wool.Debug("redis is ready!")
-					return nil
-				}
-			}
-			conn.Close()
-		}
-		s.Wool.Debug("waiting for redis to be ready", wool.ErrField(err))
-		time.Sleep(2 * time.Second)
+	if err = waitForRedisPong(ctx, redisWaitOptions{
+		address:  address,
+		password: s.redisPassword,
+		budget:   redisDockerReadinessBudget,
+		onAttemptFailed: func(probeErr error) {
+			s.Wool.Debug("waiting for redis to be ready", wool.ErrField(probeErr))
+		},
+	}); err != nil {
+		return s.Wool.Wrapf(err, "redis is not ready")
 	}
-	return s.Wool.NewError("redis is not ready")
+
+	s.Wool.Debug("redis is ready!")
+	return nil
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {

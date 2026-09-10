@@ -20,6 +20,34 @@ jobs:
       contents: read
     uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
 
+  # Socket fixtures pin the readiness protocol; only a real server proves redis
+  # agrees with it. This job runs both backends with real credentials, and
+  # REDIS_INFRA_TESTS=required turns a missing backend into a failure so the job
+  # cannot pass by skipping.
+  infrastructure:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # setup-go's cache corrupts the downloaded toolchain module on restore, so
+      # the shared go-service-ci workflow disables it too.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Readiness against real redis
+        env:
+          REDIS_INFRA_TESTS: required
+        run: go test -run TestRealRedis -count=1 -v -timeout 30m ./...
+
   image:
     permissions:
       contents: read

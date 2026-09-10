@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -63,6 +62,11 @@ func fakeRedisMain(mode string) {
 		fmt.Fprintln(os.Stderr, "fake redis:", err)
 		os.Exit(2)
 	}
+	password, err := passwordFromRedisConfig(os.Args[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake redis:", err)
+		os.Exit(2)
+	}
 	// The pid line is the test's evidence of which process the agent owns. It
 	// matches the redis log prefix so the production log writer parses it.
 	fmt.Printf("%d:M 1 Jan 2026 00:00:00.000 * fake redis mode=%s port=%d\n", os.Getpid(), mode, port)
@@ -85,15 +89,32 @@ func fakeRedisMain(mode string) {
 		if acceptErr != nil {
 			os.Exit(0)
 		}
-		go func() {
-			defer conn.Close()
-			buf := make([]byte, 64)
-			if _, readErr := conn.Read(buf); readErr != nil {
-				return
-			}
-			_, _ = conn.Write([]byte("+PONG\r\n"))
-		}()
+		// Same command handling the socket fixtures use: AUTH against the
+		// configured password, then PING, and "-NOAUTH" for a PING before it.
+		go (&authRedis{password: password}).handle(conn)
 	}
+}
+
+// passwordFromRedisConfig reads back what writeConfig quoted into the file, so
+// the stand-in requires exactly the credential the agent projected.
+func passwordFromRedisConfig(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		value, found := strings.CutPrefix(scanner.Text(), "requirepass ")
+		if !found {
+			continue
+		}
+		return strconv.Unquote(value)
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 func portFromRedisConfig(path string) (uint16, error) {
@@ -275,24 +296,12 @@ func requirePortFree(t *testing.T, port uint16) {
 	t.Fatalf("port %d is still held: %v", port, lastErr)
 }
 
-func requireRedisAnswers(t *testing.T, port uint16) {
+func requireRedisAnswers(t *testing.T, port uint16, password string) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial redis: %v", err)
-	}
-	defer conn.Close()
-	if _, err = conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
-		t.Fatalf("write PING: %v", err)
-	}
-	buf := make([]byte, 16)
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	read, err := conn.Read(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
-		t.Fatalf("read PING reply: %v", err)
-	}
-	if !bytes.HasPrefix(buf[:read], []byte("+PONG")) {
-		t.Fatalf("redis replied %q, want +PONG", buf[:read])
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := probeRedis(ctx, fmt.Sprintf("127.0.0.1:%d", port), password); err != nil {
+		t.Fatalf("redis is not answering as the configured credentials: %v", err)
 	}
 }
 
@@ -327,6 +336,12 @@ func TestNativeLaunchRollsBackWhenReadinessIsCancelled(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("launch error does not carry the cancellation: %v", err)
+	}
+	// Cancellation must not hide what the probe last reported: error
+	// classification has to hold on every exit path, not just the terminal ones.
+	var probeErr *redisProbeError
+	if !errors.As(err, &probeErr) {
+		t.Fatalf("launch error hides the last probe from errors.As: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed >= redisReadyTimeout {
 		t.Fatalf("launch waited out the readiness budget (%s) instead of honouring cancellation", elapsed)
@@ -381,7 +396,7 @@ func TestNativeStopReleasesPortAndRetainsState(t *testing.T) {
 	}
 	pid := ownedPID(t, n)
 	t.Logf("owned pid %d on port %d", pid, port)
-	requireRedisAnswers(t, port)
+	requireRedisAnswers(t, port, "hunter2")
 
 	if err := n.Stop(context.Background()); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -514,4 +529,32 @@ func TestNativeConfigPersistsDatasetOnShutdown(t *testing.T) {
 	if !strings.Contains(config, "dir "+strconv.Quote(n.dataDir)) {
 		t.Fatalf("config does not point the dataset at the retained data dir:\n%s", config)
 	}
+}
+
+// TestNativeReadinessRequiresTheProjectedPassword covers the native half of the
+// readiness contract. The server is up and answering on the port, but not as the
+// credentials the agent projected — a stale or mismatched password — so it is
+// not ready, and no amount of waiting makes it ready.
+func TestNativeReadinessRequiresTheProjectedPassword(t *testing.T) {
+	n, port := newFakeNativeRedis(t, fakeRedisServe)
+	// The config the server reads keeps the password writeConfig already wrote;
+	// only the agent's side changes, so the two genuinely disagree.
+	const wrong = "not-the-projected-password"
+	n.password = wrong
+
+	start := time.Now()
+	err := n.launch(context.Background())
+	if err == nil {
+		t.Fatal("launch reported ready against a server it never authenticated with")
+	}
+	if !strings.Contains(err.Error(), "WRONGPASS") {
+		t.Fatalf("error is not an authentication diagnostic: %v", err)
+	}
+	if strings.Contains(err.Error(), wrong) {
+		t.Fatalf("error leaks credentials: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= redisReadyTimeout {
+		t.Fatalf("launch retried a credential failure for %s instead of failing fast", elapsed)
+	}
+	requirePortFree(t, port)
 }

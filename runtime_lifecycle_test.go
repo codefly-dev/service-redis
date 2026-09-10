@@ -297,7 +297,7 @@ func TestRuntimeStopKeepsRedisRunningWhenAskedTo(t *testing.T) {
 	if rt.nativeRuntime() == nil {
 		t.Error("keep-running Stop gave up ownership of a server it left running")
 	}
-	requireRedisAnswers(t, port)
+	requireRedisAnswers(t, port, "hunter2")
 
 	// Clearing the opt-in releases it, so the test does not leak the server.
 	rt.Settings.KeepRunning = false
@@ -377,7 +377,7 @@ func TestRuntimeInitKeepsAWorkingRedisWhenTheRequestIsInvalid(t *testing.T) {
 	if rt.nativeRuntime() == nil {
 		t.Fatal("Init gave up ownership of a server it left running")
 	}
-	requireRedisAnswers(t, port)
+	requireRedisAnswers(t, port, "hunter2")
 
 	// Ownership survived, so the server is still reachable — prove it rather
 	// than leaking it.
