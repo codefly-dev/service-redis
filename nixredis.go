@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
@@ -49,16 +50,46 @@ var redisFlakeNix string
 //go:embed nix/flake.lock
 var redisFlakeLock string
 
+const (
+	// redisReadyTimeout bounds how long a freshly spawned server may take to
+	// answer its first probe.
+	redisReadyTimeout = 30 * time.Second
+	// redisProbeInterval spaces readiness probes.
+	redisProbeInterval = 500 * time.Millisecond
+	// redisTeardownBudget bounds every teardown. Teardown deliberately ignores
+	// the caller's cancellation — a cancelled context is usually the reason we
+	// are tearing down, and skipping the stop is what orphans the process — so
+	// this budget is the only thing bounding how far a Stop can run past the
+	// caller's deadline. It is sized to just cover the runner's own
+	// SIGTERM-then-SIGKILL escalation (5s + 2s) plus room to observe the exit,
+	// and no longer.
+	redisTeardownBudget = 10 * time.Second
+)
+
+// redisRunner is the slice of a runner environment the native lifecycle needs.
+// newNixRedis is the only constructor and it always supplies a
+// runners.NixEnvironment, so production redis is always the nix-provisioned
+// binary; naming the two methods used keeps the lifecycle exercisable against a
+// real process on a host without nix.
+type redisRunner interface {
+	Init(ctx context.Context) error
+	NewProcess(bin string, args ...string) (runners.Proc, error)
+}
+
 // nixRedis runs a native redis server off a nix-provisioned binary.
 type nixRedis struct {
-	env        *runners.NixEnvironment
+	env        redisRunner
 	flakeDir   string
 	dataDir    string
 	configPath string
 	port       uint16
 	password   string
 	out        io.Writer
-	proc       runners.Proc
+	// mu guards the lifecycle state below — proc, serverExit and the detached
+	// context. Stop mutates all of it and can arrive on any RPC goroutine, so a
+	// Stop racing a Destroy would otherwise be a data race on the handle itself.
+	mu   sync.Mutex
+	proc runners.Proc
 	// serverCtx is the context the redis process runs under. It MUST outlive
 	// Init: starting redis under the Init RPC's ctx kills it the instant Init
 	// returns and that ctx is cancelled. Cancelled only by Stop.
@@ -68,6 +99,11 @@ type nixRedis struct {
 	// Invoking it by absolute path runs the nix-provisioned redis even if a
 	// system redis shadows PATH.
 	serverPath string
+	// serverExit carries the redis process's terminal result. Readiness and
+	// Supervise both observe it, so a server that dies before answering PING
+	// fails immediately instead of waiting out the readiness deadline, and a
+	// server that dies mid-run is reported instead of silently disappearing.
+	serverExit <-chan error
 	// owner is the exclusive lock this invocation holds on runtimeRoot for the
 	// whole session. It is what makes the config and data below runtimeRoot
 	// *this* invocation's resources: a second invocation that would land on the
@@ -360,8 +396,28 @@ func (n *nixRedis) Init(ctx context.Context) (err error) {
 	if err := n.writeConfig(); err != nil {
 		return err
 	}
-	if err := n.startServer(ctx); err != nil {
-		return err
+	return n.launch(ctx)
+}
+
+// launch spawns redis and waits for it to answer, releasing the process again
+// if it never does. The rollback is armed from the moment redis exists, so a
+// readiness check that fails — or that the caller cancels — cannot return an
+// error while leaving a live server holding the assigned port. The data
+// directory and config are left in place: a failed start disposes of execution
+// resources, not of state.
+func (n *nixRedis) launch(ctx context.Context) (err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Teardown runs on its own budget: the caller's ctx is very often the
+		// reason we are rolling back, and a cancelled ctx must not skip the stop.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisTeardownBudget)
+		defer cancel()
+		err = errors.Join(err, n.Stop(cleanupCtx))
+	}()
+	if startErr := n.startServer(ctx); startErr != nil {
+		return startErr
 	}
 	return n.waitReady(ctx)
 }
@@ -475,7 +531,13 @@ func (n *nixRedis) writeConfig() error {
 		"bind 127.0.0.1",
 		"protected-mode yes",
 		"dir " + strconv.Quote(n.dataDir),
-		`save ""`,
+		// Stop terminates this server, and the lifecycle contract is that
+		// stopping ends execution while the dataset survives. Redis only writes
+		// an RDB on SIGTERM when at least one save point is configured; with
+		// `save ""` the shutdown path skips the dump and the whole dataset goes
+		// with the process. The save point is what makes the retained data dir
+		// actually hold anything, and what a later Init reloads.
+		"save 60 1",
 		"appendonly no",
 		"daemonize no",
 	}
@@ -500,12 +562,23 @@ func (n *nixRedis) startServer(ctx context.Context) error {
 	}
 	// Run redis under a context that outlives Init — NOT the Init RPC ctx, which
 	// is cancelled the moment Init returns and would SIGTERM the server.
-	n.serverCtx, n.serverCancel = context.WithCancel(context.Background())
-	if err := proc.Start(n.serverCtx); err != nil {
-		n.serverCancel()
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	n.mu.Lock()
+	n.serverCtx, n.serverCancel = serverCtx, serverCancel
+	n.mu.Unlock()
+	if err := proc.Start(serverCtx); err != nil {
+		serverCancel()
 		return fmt.Errorf("start redis: %w", err)
 	}
+	exit := make(chan error, 1)
+	go func() {
+		exit <- proc.Wait(context.Background())
+		close(exit)
+	}()
+	n.mu.Lock()
 	n.proc = proc
+	n.serverExit = exit
+	n.mu.Unlock()
 	return nil
 }
 
@@ -513,52 +586,170 @@ func (n *nixRedis) serverArgs() []string {
 	return []string{n.configPath}
 }
 
-// waitReady polls the redis port with a PING until it answers. A passworded
-// server replies "-NOAUTH …" to an unauthenticated PING, which still proves it
-// is up and accepting connections — so any reply counts as ready.
+// waitReady polls the redis port with a PING until it answers, giving up when
+// the server dies, when the caller cancels, or when the readiness budget runs
+// out. A server that has already exited is never ready: whatever answers on the
+// port after that belongs to someone else.
 func (n *nixRedis) waitReady(ctx context.Context) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", n.port)
-	deadline := time.Now().Add(30 * time.Second)
+	ctx, cancel := context.WithTimeout(ctx, redisReadyTimeout)
+	defer cancel()
 	var lastErr error
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
-		if err != nil {
-			lastErr = err
-			time.Sleep(500 * time.Millisecond)
-			continue
+	for {
+		if exitErr, exited := n.exited(); exited {
+			return redisExitedBeforeReady(exitErr)
 		}
-		_, _ = conn.Write([]byte("*1\r\n$4\r\nPING\r\n"))
-		buf := make([]byte, 16)
-		_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		nr, rerr := conn.Read(buf)
-		_ = conn.Close()
-		if rerr == nil && nr > 0 {
+		lastErr = n.probe(ctx, addr)
+		if lastErr == nil {
+			if exitErr, exited := n.exited(); exited {
+				return redisExitedBeforeReady(exitErr)
+			}
 			return nil
 		}
-		lastErr = rerr
-		time.Sleep(500 * time.Millisecond)
+		n.mu.Lock()
+		exit := n.serverExit
+		n.mu.Unlock()
+		select {
+		case exitErr, ok := <-exit:
+			if !ok {
+				exitErr = nil
+			}
+			return redisExitedBeforeReady(exitErr)
+		case <-ctx.Done():
+			return fmt.Errorf("redis did not become ready on %s: %w (last probe: %v)", addr, ctx.Err(), lastErr)
+		case <-time.After(redisProbeInterval):
+		}
 	}
-	return fmt.Errorf("redis did not become ready on %s: %w", addr, lastErr)
 }
 
-// Stop terminates the redis server process and then releases this invocation's
-// claim on its runtime root — in that order, so the claim outlives the resource
-// it protects. Config and data are left in place: another invocation's state is
-// never reachable from here, and this invocation's own state is what a
-// same-scope restart is meant to reuse.
+// probe dials the server and sends a PING. A passworded server replies
+// "-NOAUTH …" to an unauthenticated PING, which still proves it is up and
+// accepting connections — so any reply counts as ready.
+func (n *nixRedis) probe(ctx context.Context, addr string) error {
+	dialer := net.Dialer{Timeout: 1 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err = conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+		return err
+	}
+	buf := make([]byte, 16)
+	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	if _, err = conn.Read(buf); err != nil {
+		return err
+	}
+	return nil
+}
+
+// exited reports the process's terminal result if it has already exited,
+// without blocking.
+func (n *nixRedis) exited() (error, bool) {
+	n.mu.Lock()
+	exit := n.serverExit
+	n.mu.Unlock()
+	select {
+	case err, ok := <-exit:
+		if !ok {
+			return nil, true
+		}
+		return err, true
+	default:
+		return nil, false
+	}
+}
+
+func redisExitedBeforeReady(err error) error {
+	if err == nil {
+		return errors.New("redis exited before it became ready")
+	}
+	return fmt.Errorf("redis exited before it became ready: %w", err)
+}
+
+// Supervise reports a termination of the running server that a deliberate Stop
+// did not ask for, exactly once. The native runtime is a host process the agent
+// owns directly, with no container engine behind it: without this the server can
+// die mid-run — a crash, an outside SIGTERM, a port stolen on restart — while
+// the agent keeps reporting STARTED and every dependent spins on connection
+// refused.
+//
+// Call it once, after a successful launch: startServer has published serverExit
+// and waitReady has finished observing it, so this goroutine is its sole
+// remaining reader.
+func (n *nixRedis) Supervise(onExit func(error)) {
+	n.mu.Lock()
+	exit := n.serverExit
+	// Stop cancels serverCtx before terminating the process, so a cancelled
+	// context is the authoritative "this shutdown was orderly" signal.
+	var stopped <-chan struct{}
+	if n.serverCtx != nil {
+		stopped = n.serverCtx.Done()
+	}
+	n.mu.Unlock()
+	if exit == nil {
+		return
+	}
+	go func() {
+		err, ok := <-exit
+		if !ok {
+			return
+		}
+		if stopped != nil {
+			select {
+			case <-stopped:
+				return
+			default:
+			}
+		}
+		onExit(err)
+	}()
+}
+
+// Stop terminates the redis server, waits for it to be reaped so the assigned
+// port is free by the time Stop returns, and only then releases this
+// invocation's claim on its runtime root — in that order, so the claim outlives
+// the resource it protects. Config and data are left in place: stopping ends
+// execution, it does not dispose of state, and this invocation's own state is
+// what a same-scope restart is meant to reuse.
+//
+// A server that cannot be confirmed dead leaves BOTH the handle and the claim
+// in place, and reports why. Dropping the handle orphans a process that may
+// still be alive; dropping the claim hands the data dir to another invocation
+// while that process still has it open.
 func (n *nixRedis) Stop(ctx context.Context) error {
+	// Held for the whole teardown: a concurrent Stop and Destroy would otherwise
+	// both read the handle, both signal, and both clear it. Serialized, the
+	// second one finds no process and is the no-op it should be.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if n.serverCancel != nil {
 		n.serverCancel()
 	}
 	if n.proc != nil {
-		if err := n.proc.Stop(ctx); err != nil {
-			// Keep the claim. serverCancel only *requests* termination, so a
-			// server we cannot confirm dead may still hold the data dir, and
-			// handing the root to another invocation now is precisely the
-			// collision the claim exists to prevent.
-			return err
+		// Teardown gets its own bounded budget and ignores the caller's
+		// cancellation: a cancelled ctx is very often the reason we are tearing
+		// down, and skipping the stop is exactly what orphans the process.
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisTeardownBudget)
+		defer cancel()
+		stopErr := n.proc.Stop(stopCtx)
+		if n.serverExit != nil {
+			select {
+			case <-n.serverExit:
+			case <-stopCtx.Done():
+				// serverCancel only *requests* termination, and proc.Stop can
+				// give up on a process that refuses to die. A server we cannot
+				// confirm dead may still hold the port and the data dir, so
+				// neither the handle nor the claim may be given up here.
+				return errors.Join(stopErr, fmt.Errorf("redis on port %d did not terminate: %w", n.port, stopCtx.Err()))
+			}
+		}
+		if stopErr != nil {
+			return stopErr
 		}
 		n.proc = nil
+		n.serverExit = nil
 	}
 	if n.owner != nil {
 		releaseRuntimeRoot(n.owner)
