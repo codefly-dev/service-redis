@@ -7,3 +7,11 @@ This service provides a Docker-managed Redis instance for caching and data stora
 - Supports optional password authentication
 
 This service provides a local Redis instance for development and testing purposes.
+
+## Redis version
+
+The container runtime serves the Redis version baked into the pinned runtime
+image (`runtime-image.json`). The Docker-free (nix) runtime serves the Redis
+that `nix/flake.lock` pins: `redis-server` is taken from the PATH the locked
+devShell exports, never from a `/nix/store` scan or the host's PATH, so the
+version only ever moves when that lock does.
