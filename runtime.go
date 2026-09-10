@@ -118,7 +118,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	// (e.g. a host without Docker). Same port, so WaitForReady is unchanged.
 	if rc := req.GetRuntimeContext(); rc != nil && rc.Kind == resources.RuntimeContextNix {
 		s.Infof("using nix runtime for redis on port %d", instance.Port)
-		nixr, errNix := newNixRedis(ctx, s.Location, uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
+		nixr, errNix := newNixRedis(ctx, redisStateKey(s.Location, s.Environment.GetNamingScope()), uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}

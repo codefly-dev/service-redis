@@ -9,12 +9,17 @@ package main
 // materializes `redis` from the embedded flake (no system install required),
 // and this file drives the native lifecycle — launch `redis-server` bound to
 // the agent-assigned port on loopback (with the configured password) and wait
-// for it to answer PING. redis is config-light, so unlike neo4j there is no
-// writable-conf seeding: everything is passed as CLI flags, and the only
-// writable state is the data dir.
+// for it to answer PING.
 //
 // Both runtimes serve on the same assigned port, so the rest of the agent
 // (WaitForReady, connection strings) is unchanged.
+//
+// On-disk state is split by mutability. The embedded flake and its nix
+// materialization cache are immutable and identical for every invocation, so
+// they live in one content-addressed root shared by all of them. The
+// credential-bearing redis.conf and the data dir are per-session: their root is
+// keyed by the service location AND the codefly naming scope, so two concurrent
+// invocations of the same service never write each other's config or data.
 
 import (
 	"context"
@@ -31,6 +36,7 @@ import (
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
+	"github.com/gofrs/flock"
 )
 
 //go:embed nix/flake.nix
@@ -58,14 +64,27 @@ type nixRedis struct {
 	// by absolute path runs the nix-built redis even if a system redis shadows
 	// PATH.
 	binDir string
+	// owner is the exclusive lock this invocation holds on runtimeRoot for the
+	// whole session. It is what makes the config and data below runtimeRoot
+	// *this* invocation's resources: a second invocation that would land on the
+	// same root is refused rather than silently rewriting them. Released by Stop
+	// (and by the kernel if the agent dies).
+	owner *flock.Flock
+	// sharedNixRoot holds the immutable flake and its materialization cache,
+	// shared by every invocation on this host.
+	sharedNixRoot string
 }
 
-// newNixRedis materializes the embedded flake and keeps all mutable state in a
-// private per-service user cache directory. Keeping Nix inputs, cache files,
-// Redis data, and the secret-bearing config out of the source checkout avoids
-// invalidating parent flakes and accidentally committing runtime state.
-func newNixRedis(ctx context.Context, baseDir string, port uint16, password string, out io.Writer) (*nixRedis, error) {
-	runtimeRoot, err := redisRuntimeRoot(baseDir)
+// newNixRedis prepares a native redis whose mutable, credential-bearing state
+// (redis.conf, data) lives in a private user cache directory owned exclusively
+// by this invocation, and whose immutable nix inputs are shared with every
+// other invocation on the host. Keeping all of it out of the source checkout
+// avoids invalidating parent flakes and committing runtime state.
+//
+// stateKey comes from redisStateKey: the service location plus the codefly
+// naming scope. It never contains the password.
+func newNixRedis(ctx context.Context, stateKey string, port uint16, password string, out io.Writer) (*nixRedis, error) {
+	runtimeRoot, err := redisRuntimeRoot(stateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -75,50 +94,150 @@ func newNixRedis(ctx context.Context, baseDir string, port uint16, password stri
 	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("secure redis runtime root: %w", err)
 	}
-	flakeDir := filepath.Join(runtimeRoot, "nix")
-	if err := os.MkdirAll(flakeDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create nix flake dir: %w", err)
+	owner, err := claimRuntimeRoot(runtimeRoot)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(flakeDir, "flake.nix"), []byte(redisFlakeNix), 0o644); err != nil {
-		return nil, fmt.Errorf("write flake.nix: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), []byte(redisFlakeLock), 0o644); err != nil {
-		return nil, fmt.Errorf("write flake.lock: %w", err)
+	sharedNixRoot, flakeDir, err := materializeSharedFlake()
+	if err != nil {
+		releaseRuntimeRoot(owner)
+		return nil, err
 	}
 	env, err := runners.NewNixEnvironment(ctx, flakeDir)
 	if err != nil {
+		releaseRuntimeRoot(owner)
 		return nil, fmt.Errorf("nix environment (is nix installed?): %w", err)
 	}
-	env.WithCacheDir(filepath.Join(runtimeRoot, ".nix-cache"))
+	env.WithCacheDir(filepath.Join(sharedNixRoot, "cache"))
 	return &nixRedis{
-		env:        env,
-		flakeDir:   flakeDir,
-		dataDir:    filepath.Join(runtimeRoot, "data"),
-		configPath: filepath.Join(runtimeRoot, "redis.conf"),
-		port:       port,
-		password:   password,
-		out:        out,
+		env:           env,
+		flakeDir:      flakeDir,
+		dataDir:       filepath.Join(runtimeRoot, "data"),
+		configPath:    filepath.Join(runtimeRoot, "redis.conf"),
+		port:          port,
+		password:      password,
+		out:           out,
+		owner:         owner,
+		sharedNixRoot: sharedNixRoot,
 	}, nil
 }
 
-func redisServiceHash(baseDir string) string {
-	sum := sha256.Sum256([]byte(baseDir))
+// redisStateKey identifies the mutable state a redis invocation owns. An
+// unscoped run keeps the historical per-location key, so an existing user's
+// data and config stay exactly where they are across this upgrade. A run that
+// codefly gave a naming scope — the carrier for a disposable invocation
+// identity — gets its own key, so concurrent invocations of the same service
+// cannot read or truncate each other's credential-bearing config.
+func redisStateKey(serviceLocation, namingScope string) string {
+	if namingScope == "" {
+		return serviceLocation
+	}
+	return serviceLocation + "\x00naming-scope\x00" + namingScope
+}
+
+func redisServiceHash(stateKey string) string {
+	sum := sha256.Sum256([]byte(stateKey))
 	return hex.EncodeToString(sum[:])
 }
 
-func redisRuntimeRoot(baseDir string) (string, error) {
+// redisRuntimeRoot is the out-of-source root for one invocation's mutable
+// state, keyed by its scoped state identity so same-scope restarts reuse their
+// data while different scopes never meet.
+func redisRuntimeRoot(stateKey string) (string, error) {
+	cache, err := redisCacheRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cache, redisServiceHash(stateKey)[:16]), nil
+}
+
+func redisCacheRoot() (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		cache = os.TempDir()
 	}
-	return filepath.Join(cache, "codefly", "redis", redisServiceHash(baseDir)[:16]), nil
+	return filepath.Join(cache, "codefly", "redis"), nil
+}
+
+// claimRuntimeRoot takes the invocation's exclusive lock on its mutable state.
+// Two invocations only ever land on the same root when they share a state key,
+// which means an operator asked for reusable state; adopting it concurrently is
+// ambiguous — one would overwrite the other's config while it is being read —
+// so the second is refused with the way out.
+func claimRuntimeRoot(runtimeRoot string) (*flock.Flock, error) {
+	owner := flock.New(filepath.Join(runtimeRoot, ".owner.lock"), flock.SetPermissions(0o600))
+	held, err := owner.TryLock()
+	if err != nil {
+		_ = owner.Close()
+		return nil, fmt.Errorf("claim redis runtime root %s: %w", runtimeRoot, err)
+	}
+	if !held {
+		_ = owner.Close()
+		return nil, fmt.Errorf("redis runtime state %s is already in use by another codefly invocation: give this run its own naming scope to isolate it", runtimeRoot)
+	}
+	return owner, nil
+}
+
+func releaseRuntimeRoot(owner *flock.Flock) {
+	_ = owner.Unlock()
+	_ = owner.Close()
+}
+
+// materializeSharedFlake writes the embedded flake to a root addressed by its
+// own contents and returns (shared root, flake dir). The flake and the nix
+// materialization it produces are immutable and identical for every invocation,
+// so they are shared rather than duplicated per session — a fresh scope pays
+// for redis.conf and a data dir, not for another nix download.
+//
+// The two files are written through a rename so a concurrent nix evaluation
+// reads either the previous or the complete new file, never a truncated one.
+func materializeSharedFlake() (string, string, error) {
+	cache, err := redisCacheRoot()
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256([]byte(redisFlakeNix + "\x00" + redisFlakeLock))
+	sharedNixRoot := filepath.Join(cache, "nix", hex.EncodeToString(sum[:])[:16])
+	flakeDir := filepath.Join(sharedNixRoot, "flake")
+	if err := os.MkdirAll(flakeDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("create nix flake dir: %w", err)
+	}
+	for name, contents := range map[string]string{"flake.nix": redisFlakeNix, "flake.lock": redisFlakeLock} {
+		if err := writeFileAtomic(filepath.Join(flakeDir, name), []byte(contents), 0o644); err != nil {
+			return "", "", fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+	return sharedNixRoot, flakeDir, nil
+}
+
+// writeFileAtomic replaces path with contents in one rename, so a reader either
+// sees the previous file or the complete new one.
+func writeFileAtomic(path string, contents []byte, perm os.FileMode) error {
+	dir, name := filepath.Split(path)
+	tmp, err := os.CreateTemp(dir, "."+name+".tmp")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(contents); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // Init materializes the nix env, locates redis-server, launches it bound to the
 // assigned port, and waits until it answers PING.
 func (n *nixRedis) Init(ctx context.Context) error {
-	if err := n.env.Init(ctx); err != nil {
-		return fmt.Errorf("materialize nix redis env: %w", err)
+	if err := n.initSharedEnv(ctx); err != nil {
+		return err
 	}
 	if err := n.resolveStore(); err != nil {
 		return err
@@ -133,6 +252,27 @@ func (n *nixRedis) Init(ctx context.Context) error {
 		return err
 	}
 	return n.waitReady(ctx)
+}
+
+// initSharedEnv materializes the shared nix env under an exclusive lock.
+// Materialization writes a devshell env cache and a GC-root profile in the
+// shared root; concurrent invocations evaluating the same flake would race on
+// both. The lock is held only for materialization — the per-session config and
+// data below runtimeRoot are never covered by it.
+func (n *nixRedis) initSharedEnv(ctx context.Context) error {
+	materialization := flock.New(filepath.Join(n.sharedNixRoot, "materialize.lock"), flock.SetPermissions(0o600))
+	if _, err := materialization.TryLockContext(ctx, 50*time.Millisecond); err != nil {
+		_ = materialization.Close()
+		return fmt.Errorf("lock nix redis materialization in %s: %w", n.sharedNixRoot, err)
+	}
+	defer func() {
+		_ = materialization.Unlock()
+		_ = materialization.Close()
+	}()
+	if err := n.env.Init(ctx); err != nil {
+		return fmt.Errorf("materialize nix redis env: %w", err)
+	}
+	return nil
 }
 
 // resolveStore locates the nix-store redis-server binary by absolute path —
@@ -151,7 +291,9 @@ func (n *nixRedis) resolveStore() error {
 }
 
 // writeConfig keeps the password out of process argv (and therefore ps/process
-// inspection). The parent runtime directory and this file are owner-only.
+// inspection). The parent runtime directory and this file are owner-only, and
+// the file is replaced in one rename so a redis-server reading it can never see
+// a half-written config.
 func (n *nixRedis) writeConfig() error {
 	lines := []string{
 		"port " + strconv.Itoa(int(n.port)),
@@ -166,20 +308,8 @@ func (n *nixRedis) writeConfig() error {
 		lines = append(lines, "requirepass "+strconv.Quote(n.password))
 	}
 	contents := []byte(strings.Join(lines, "\n") + "\n")
-	file, err := os.OpenFile(n.configPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("create redis config: %w", err)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("secure redis config: %w", err)
-	}
-	if _, err := file.Write(contents); err != nil {
-		_ = file.Close()
+	if err := writeFileAtomic(n.configPath, contents, 0o600); err != nil {
 		return fmt.Errorf("write redis config: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close redis config: %w", err)
 	}
 	return nil
 }
@@ -236,10 +366,17 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 	return fmt.Errorf("redis did not become ready on %s: %w", addr, lastErr)
 }
 
-// Stop terminates the redis server process.
+// Stop terminates the redis server process and releases this invocation's claim
+// on its runtime root. Config and data are left in place: another invocation's
+// state is never reachable from here, and this invocation's own state is what a
+// same-scope restart is meant to reuse.
 func (n *nixRedis) Stop(ctx context.Context) error {
 	if n.serverCancel != nil {
 		n.serverCancel()
+	}
+	if n.owner != nil {
+		releaseRuntimeRoot(n.owner)
+		n.owner = nil
 	}
 	if n.proc == nil {
 		return nil
