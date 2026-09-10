@@ -69,7 +69,10 @@ func startRealRedis(t *testing.T, password string) string {
 		t.Fatalf("docker run: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		_ = exec.Command("docker", "rm", "--force", name).Run()
+		// Bounded: a wedged daemon must not hang the test binary in cleanup.
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), time.Minute)
+		defer rmCancel()
+		_ = exec.CommandContext(rmCtx, "docker", "rm", "--force", name).Run()
 	})
 
 	published, err := exec.CommandContext(ctx, "docker", "port", name, "6379/tcp").Output()

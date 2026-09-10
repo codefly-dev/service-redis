@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"time"
@@ -24,10 +23,14 @@ const (
 	redisProbeDialTimeout = 2 * time.Second
 	redisProbeIOTimeout   = 2 * time.Second
 
-	// A readiness handshake is two short replies. Bounding the whole exchange and
-	// each frame keeps a hostile or broken peer from growing our buffers.
-	redisProbeMaxExchangeBytes = 4096
-	redisProbeMaxFrameBytes    = 512
+	// bufio never grows past this, surfacing anything longer as ErrBufferFull
+	// instead, so it is what bounds a hostile or broken peer: a readiness reply
+	// is one short frame and the handshake reads at most two.
+	redisProbeMaxFrameBytes = 512
+
+	// Liveness costs a forked `ps`, so it runs on a multiple of the probe
+	// interval rather than on every attempt.
+	redisLivenessCheckEvery = 4
 
 	// Docker publishes the host port as soon as the container is created, well
 	// before redis inside it serves, and a cold container start is slower than a
@@ -59,6 +62,10 @@ type redisWaitOptions struct {
 	address  string
 	password string
 	budget   time.Duration
+
+	// onAttemptFailed, when set, receives every failed probe. Without it a wait
+	// is silent for its whole budget, which is the failure users actually watch.
+	onAttemptFailed func(error)
 }
 
 // waitForRedisPong probes until redis completes an authenticated PING, the
@@ -75,13 +82,15 @@ func waitForRedisPong(ctx context.Context, opts redisWaitOptions) error {
 			return nil
 		}
 		last = err
+		if opts.onAttemptFailed != nil {
+			opts.onAttemptFailed(err)
+		}
 
 		var probeErr *redisProbeError
 		if errors.As(err, &probeErr) && !probeErr.retryable {
 			return err
 		}
-		// Only when the caller is still waiting: a cancelled context makes the
-		// liveness check itself fail, which would misreport a healthy server.
+
 		timer := time.NewTimer(redisProbeInterval)
 		select {
 		case <-ctx.Done():
@@ -114,7 +123,7 @@ func probeRedis(ctx context.Context, address string, password string) error {
 		}
 	}()
 
-	reader := bufio.NewReaderSize(io.LimitReader(conn, redisProbeMaxExchangeBytes), redisProbeMaxFrameBytes)
+	reader := bufio.NewReaderSize(conn, redisProbeMaxFrameBytes)
 
 	if password != "" {
 		if err = redisExchange(ctx, conn, reader, "authentication", address, "OK", "AUTH", password); err != nil {

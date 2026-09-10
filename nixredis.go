@@ -624,7 +624,7 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 			}
 			return redisExitedBeforeReady(exitErr)
 		case <-ctx.Done():
-			return fmt.Errorf("redis did not become ready on %s: %w (last probe: %v)", addr, ctx.Err(), lastErr)
+			return fmt.Errorf("redis did not become ready on %s: %w (last probe: %w)", addr, ctx.Err(), lastErr)
 		case <-time.After(redisProbeInterval):
 		}
 	}

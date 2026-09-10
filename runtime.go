@@ -235,6 +235,9 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 		address:  address,
 		password: s.redisPassword,
 		budget:   redisDockerReadinessBudget,
+		onAttemptFailed: func(probeErr error) {
+			s.Wool.Debug("waiting for redis to be ready", wool.ErrField(probeErr))
+		},
 	}); err != nil {
 		return s.Wool.Wrapf(err, "redis is not ready")
 	}

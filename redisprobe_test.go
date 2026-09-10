@@ -319,3 +319,27 @@ func TestWaitForRedisPongRespectsBudget(t *testing.T) {
 		t.Fatalf("error does not carry the last actionable probe failure: %v", err)
 	}
 }
+
+// TestWaitForRedisPongReportsEachFailedAttempt covers the caller's only window
+// into a wait that is otherwise silent for its whole budget.
+func TestWaitForRedisPongReportsEachFailedAttempt(t *testing.T) {
+	server := newScriptedRedis(t, "-LOADING Redis is loading the dataset in memory\r\n")
+
+	var reported []error
+	err := waitForRedisPong(context.Background(), redisWaitOptions{
+		address:         server.address(),
+		budget:          1500 * time.Millisecond,
+		onAttemptFailed: func(attemptErr error) { reported = append(reported, attemptErr) },
+	})
+	if err == nil {
+		t.Fatal("waitForRedisPong reported a permanently loading server as ready")
+	}
+	if len(reported) < 2 {
+		t.Fatalf("onAttemptFailed fired %d times, want one per failed probe", len(reported))
+	}
+	for i, attemptErr := range reported {
+		if !strings.Contains(attemptErr.Error(), "LOADING") {
+			t.Fatalf("attempt %d did not carry the probe failure: %v", i, attemptErr)
+		}
+	}
+}

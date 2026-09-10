@@ -337,6 +337,12 @@ func TestNativeLaunchRollsBackWhenReadinessIsCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("launch error does not carry the cancellation: %v", err)
 	}
+	// Cancellation must not hide what the probe last reported: error
+	// classification has to hold on every exit path, not just the terminal ones.
+	var probeErr *redisProbeError
+	if !errors.As(err, &probeErr) {
+		t.Fatalf("launch error hides the last probe from errors.As: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed >= redisReadyTimeout {
 		t.Fatalf("launch waited out the readiness budget (%s) instead of honouring cancellation", elapsed)
 	}
@@ -523,4 +529,32 @@ func TestNativeConfigPersistsDatasetOnShutdown(t *testing.T) {
 	if !strings.Contains(config, "dir "+strconv.Quote(n.dataDir)) {
 		t.Fatalf("config does not point the dataset at the retained data dir:\n%s", config)
 	}
+}
+
+// TestNativeReadinessRequiresTheProjectedPassword covers the native half of the
+// readiness contract. The server is up and answering on the port, but not as the
+// credentials the agent projected — a stale or mismatched password — so it is
+// not ready, and no amount of waiting makes it ready.
+func TestNativeReadinessRequiresTheProjectedPassword(t *testing.T) {
+	n, port := newFakeNativeRedis(t, fakeRedisServe)
+	// The config the server reads keeps the password writeConfig already wrote;
+	// only the agent's side changes, so the two genuinely disagree.
+	const wrong = "not-the-projected-password"
+	n.password = wrong
+
+	start := time.Now()
+	err := n.launch(context.Background())
+	if err == nil {
+		t.Fatal("launch reported ready against a server it never authenticated with")
+	}
+	if !strings.Contains(err.Error(), "WRONGPASS") {
+		t.Fatalf("error is not an authentication diagnostic: %v", err)
+	}
+	if strings.Contains(err.Error(), wrong) {
+		t.Fatalf("error leaks credentials: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= redisReadyTimeout {
+		t.Fatalf("launch retried a credential failure for %s instead of failing fast", elapsed)
+	}
+	requirePortFree(t, port)
 }
