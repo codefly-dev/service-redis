@@ -383,10 +383,7 @@ func newResolveHarness(t *testing.T) (*nixRedis, *resolveHarness) {
 	t.Setenv("PATH", strings.Join([]string{nixBin, hostBin, h.binIn("aaa-redis-7.0.15"), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	h.lockedTo("zzz-redis-8.2.1")
 
-	return &nixRedis{
-		flakeDir:       h.flakeDir,
-		resolutionPath: filepath.Join(root, "redis-server.json"),
-	}, h
+	return &nixRedis{flakeDir: h.flakeDir}, h
 }
 
 func (h *resolveHarness) binIn(derivation string) string {
@@ -470,48 +467,28 @@ func TestResolveStorePicksLockedRedisOverStoreOrderAndHostPath(t *testing.T) {
 	}
 }
 
-func TestResolveStoreCachesUntilTheLockChanges(t *testing.T) {
+// TestResolveStoreFollowsTheLiveDevShell is the regression cover for serving a
+// remembered resolution: after a lock bump moves redis to another derivation,
+// the next Init must run the new one, not the one a previous Init picked.
+func TestResolveStoreFollowsTheLiveDevShell(t *testing.T) {
 	n, h := newResolveHarness(t)
-	if err := n.resolveStore(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Unrelated store movement with the same lock must not move the selection.
-	h.lockedTo("aaa-redis-7.0.15")
 	if err := n.resolveStore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if want := h.serverIn("zzz-redis-8.2.1"); n.serverPath != want {
-		t.Fatalf("resolved %q on an unchanged lock, want the cached %q", n.serverPath, want)
+		t.Fatalf("resolved %q, want %q", n.serverPath, want)
 	}
 
 	h.relock()
-	if err := n.resolveStore(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if want := h.serverIn("aaa-redis-7.0.15"); n.serverPath != want {
-		t.Fatalf("resolved %q after the lock changed, want %q", n.serverPath, want)
-	}
-	if got, want := serverVersion(t, n.serverPath), "Redis server v=7.0.15"; got != want {
-		t.Fatalf("selected server reports %q, want %q", got, want)
-	}
-}
-
-func TestResolveStoreDropsCacheWhenSelectedServerIsGone(t *testing.T) {
-	n, h := newResolveHarness(t)
-	if err := n.resolveStore(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(h.store, "zzz-redis-8.2.1")); err != nil {
-		t.Fatal(err)
-	}
-
 	h.lockedTo("aaa-redis-7.0.15")
 	if err := n.resolveStore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if want := h.serverIn("aaa-redis-7.0.15"); n.serverPath != want {
-		t.Fatalf("resolved %q after the cached server vanished, want %q", n.serverPath, want)
+		t.Fatalf("resolved %q after the lock moved redis, want %q", n.serverPath, want)
+	}
+	if got, want := serverVersion(t, n.serverPath), "Redis server v=7.0.15"; got != want {
+		t.Fatalf("selected server reports %q, want %q", got, want)
 	}
 }
 
@@ -531,8 +508,23 @@ func TestResolveStoreFailsWhenLockedEnvironmentHasNoRedis(t *testing.T) {
 	}
 }
 
+// nixDevelopRedisServer asks `nix develop` — a different mechanism from the
+// print-dev-env path under test — which redis-server the devShell hands you.
+func nixDevelopRedisServer(t *testing.T, flakeDir string) string {
+	t.Helper()
+	out, err := exec.Command("nix", "--extra-experimental-features", "nix-command flakes",
+		"develop", "path:"+flakeDir, "--command", "sh", "-c", "command -v redis-server").Output()
+	if err != nil {
+		t.Fatalf("nix develop: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // TestResolveStoreAgainstRealNix exercises the whole runtime path — real flake,
-// real `nix print-dev-env`, real redis binary — on machines that have nix.
+// real `nix print-dev-env`, real redis binary — on machines that have nix. The
+// multi-derivation ordering case is covered by the stubbed tests above, which
+// can stage two redis derivations; here the equivalent guarantee is that the
+// selection equals what the devShell independently reports.
 func TestResolveStoreAgainstRealNix(t *testing.T) {
 	if _, err := exec.LookPath("nix"); err != nil {
 		t.Skip("nix is not installed")
@@ -542,6 +534,14 @@ func TestResolveStoreAgainstRealNix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// newNixRedis claims this invocation's runtime root and populates it outside
+	// any t.TempDir(). Cleanup is LIFO, so Stop — which releases the claim —
+	// runs before the removal. The shared nix root is deliberately left alone:
+	// it is reused by every invocation on this host, including the developer's.
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(n.configPath)) })
+	t.Cleanup(func() { _ = n.Stop(context.Background()) })
+
+	want := nixDevelopRedisServer(t, n.flakeDir)
 
 	// A host redis ahead of everything on PATH must not win.
 	decoy := filepath.Join(t.TempDir(), "bin")
@@ -552,8 +552,8 @@ func TestResolveStoreAgainstRealNix(t *testing.T) {
 	if err := n.initSharedEnv(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(n.serverPath, "/nix/store/") {
-		t.Fatalf("resolved %q, want a nix store path", n.serverPath)
+	if n.serverPath != want {
+		t.Fatalf("resolved %q, want the devShell's own %q", n.serverPath, want)
 	}
 	if version := serverVersion(t, n.serverPath); !strings.Contains(version, "Redis server v=") {
 		t.Fatalf("selected server reports %q", version)

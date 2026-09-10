@@ -68,9 +68,6 @@ type nixRedis struct {
 	// Invoking it by absolute path runs the nix-provisioned redis even if a
 	// system redis shadows PATH.
 	serverPath string
-	// resolutionPath caches serverPath against the flake fingerprint so a
-	// restart on an unchanged lock skips re-evaluating the flake.
-	resolutionPath string
 	// owner is the exclusive lock this invocation holds on runtimeRoot for the
 	// whole session. It is what makes the config and data below runtimeRoot
 	// *this* invocation's resources: a second invocation that would land on the
@@ -115,16 +112,15 @@ func newNixRedis(ctx context.Context, stateKey string, port uint16, password str
 	}
 	env.WithCacheDir(filepath.Join(sharedNixRoot, "cache"))
 	return &nixRedis{
-		env:            env,
-		flakeDir:       flakeDir,
-		dataDir:        filepath.Join(runtimeRoot, "data"),
-		configPath:     filepath.Join(runtimeRoot, "redis.conf"),
-		resolutionPath: filepath.Join(runtimeRoot, "redis-server.json"),
-		port:           port,
-		password:       password,
-		out:            out,
-		owner:          owner,
-		sharedNixRoot:  sharedNixRoot,
+		env:           env,
+		flakeDir:      flakeDir,
+		dataDir:       filepath.Join(runtimeRoot, "data"),
+		configPath:    filepath.Join(runtimeRoot, "redis.conf"),
+		port:          port,
+		password:      password,
+		out:           out,
+		owner:         owner,
+		sharedNixRoot: sharedNixRoot,
 	}, nil
 }
 
@@ -384,27 +380,16 @@ func (n *nixRedis) initSharedEnv(ctx context.Context) error {
 	})
 }
 
-// resolvedServer is the on-disk record of which redis-server a given
-// materialization of the flake selected.
-type resolvedServer struct {
-	Fingerprint string `json:"fingerprint"`
-	ServerPath  string `json:"server_path"`
-}
-
 // resolveStore selects redis-server from the PATH the locked devShell exports.
 // Anything else — scanning /nix/store, or a bare command name — lets an
 // unrelated redis derivation or a host install decide which server runs.
+//
+// The selection is deliberately not cached on disk. NixEnvironment already owns
+// and caches the materialization this reads; a second cache, keyed on a second
+// copy of the flake fingerprint, is one more thing that can disagree with the
+// environment redis actually runs in — and it would disagree silently.
 func (n *nixRedis) resolveStore(ctx context.Context) error {
 	w := wool.Get(ctx).In("nixRedis.resolveStore")
-	fingerprint, err := n.flakeFingerprint()
-	if err != nil {
-		return err
-	}
-	if cached := n.cachedServer(fingerprint); cached != "" {
-		n.serverPath = cached
-		w.Debug("reusing resolved redis-server", wool.Field("server", cached))
-		return nil
-	}
 	devShellPath, err := n.devShellPath(ctx)
 	if err != nil {
 		return err
@@ -414,58 +399,17 @@ func (n *nixRedis) resolveStore(ctx context.Context) error {
 		return fmt.Errorf("locked nix environment in %s does not provide redis-server: %w", n.flakeDir, err)
 	}
 	n.serverPath = server
-	if err := n.cacheServer(fingerprint, server); err != nil {
-		w.Debug("could not record redis-server resolution", wool.ErrField(err))
-	}
-	w.Info("resolved redis-server from locked nix environment",
-		wool.Field("server", server), wool.Field("flake", fingerprint))
+	w.Info("resolved redis-server from locked nix environment", wool.Field("server", server))
 	return nil
-}
-
-// flakeFingerprint hashes the materialized flake so the cached resolution is
-// discarded the moment the flake or its lock changes.
-func (n *nixRedis) flakeFingerprint() (string, error) {
-	sum := sha256.New()
-	for _, name := range []string{"flake.nix", "flake.lock"} {
-		data, err := os.ReadFile(filepath.Join(n.flakeDir, name))
-		if err != nil {
-			return "", fmt.Errorf("fingerprint nix flake: %w", err)
-		}
-		sum.Write(data)
-	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
-}
-
-func (n *nixRedis) cachedServer(fingerprint string) string {
-	data, err := os.ReadFile(n.resolutionPath)
-	if err != nil {
-		return ""
-	}
-	var cached resolvedServer
-	if err := json.Unmarshal(data, &cached); err != nil {
-		return ""
-	}
-	if cached.Fingerprint != fingerprint || !isExecutable(cached.ServerPath) {
-		return ""
-	}
-	return cached.ServerPath
-}
-
-func (n *nixRedis) cacheServer(fingerprint string, server string) error {
-	data, err := json.Marshal(resolvedServer{Fingerprint: fingerprint, ServerPath: server})
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(n.resolutionPath, data, 0o600)
 }
 
 // devShellPath returns the PATH the locked devShell exports. This is the same
 // value the codefly nix runner resolves binaries against, so the server we pick
 // here is the one the flake provisions.
 func (n *nixRedis) devShellPath(ctx context.Context) (string, error) {
-	dir, err := filepath.Abs(n.flakeDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve nix flake dir: %w", err)
+	dir := n.flakeDir
+	if abs, absErr := filepath.Abs(dir); absErr == nil {
+		dir = abs
 	}
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, "nix", "--extra-experimental-features", "nix-command flakes",
