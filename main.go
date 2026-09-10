@@ -34,6 +34,10 @@ var requirements = builders.NewDependencies(agent.Name,
 type Settings struct {
 	Password    string `yaml:"password"`
 	RequirePass bool   `yaml:"require-pass"`
+	// KeepRunning opts into warm reuse: Stop leaves the server up instead of
+	// releasing it. Stop otherwise ends execution, which for the native runtime
+	// means terminating the process and freeing the assigned port.
+	KeepRunning bool `yaml:"keep-running"`
 }
 
 // The managed image is the official redis Alpine image rebuilt with patched

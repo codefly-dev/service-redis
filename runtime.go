@@ -55,6 +55,21 @@ func (s *Runtime) nativeRuntime() *nixRedis {
 	return s.nixRuntime
 }
 
+// releaseNativeRuntime stops the native redis this runtime owns, if any, and
+// gives up ownership. A failure keeps the handle so the caller can retry rather
+// than losing track of a process that may still be alive.
+func (s *Runtime) releaseNativeRuntime(ctx context.Context) error {
+	nixr := s.nativeRuntime()
+	if nixr == nil {
+		return nil
+	}
+	if err := nixr.Stop(ctx); err != nil {
+		return err
+	}
+	s.setNativeRuntime(nil)
+	return nil
+}
+
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
@@ -81,6 +96,15 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Runtime.WithContext(req.GetRuntimeContext())
 
 	w := s.Wool.In("runtime::init")
+
+	// Init re-establishes this service, so anything a previous Init left running
+	// has to go first. Adopting a second handle over a live one drops the only
+	// reference to that process: it keeps the assigned port, the new server
+	// cannot bind, and nothing is left that can stop either of them. Releasing
+	// before any resolution work means a failed Init also leaves nothing behind.
+	if err := s.releaseNativeRuntime(ctx); err != nil {
+		return s.Runtime.InitError(err)
+	}
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
@@ -272,24 +296,30 @@ func (s *Runtime) superviseNative(nixr *nixRedis) {
 
 // Stop releases the execution resources this invocation owns and retains its
 // data. For the native runtime that means terminating the redis process and
-// freeing the assigned port, leaving the data directory and config in place for
-// the next Init; a runtime that never ran Init owns nothing and stops nothing.
+// freeing the assigned port; the dataset is written out on shutdown and the
+// data directory and config stay in place for the next Init. A runtime that
+// never ran Init owns nothing and stops nothing.
 //
-// The Docker runtime keeps its container running across Stop, as it always has.
-// Changing that is a policy change about warm reuse, not part of owning the
-// native process, and it needs its own opt-in rather than arriving as a side
-// effect here.
+// keep-running opts out: the server stays up for warm reuse. The Docker runtime
+// keeps its container running across Stop as it always has; moving it onto the
+// same release contract is a separate policy change, not part of owning the
+// native process.
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	if nixr := s.nativeRuntime(); nixr != nil {
-		if err := nixr.Stop(ctx); err != nil {
-			// Keep the handle. The process may still be alive, and dropping the
-			// only reference to it is how it becomes an orphan: Destroy retries.
+	if s.Settings.KeepRunning {
+		s.Wool.Debug("keep-running is set: leaving redis up for reuse")
+		return s.Runtime.StopResponse()
+	}
+
+	if s.nativeRuntime() != nil {
+		if err := s.releaseNativeRuntime(ctx); err != nil {
+			// The handle is kept: the process may still be alive, and dropping
+			// the only reference to it is how it becomes an orphan. Destroy
+			// retries.
 			return s.Runtime.StopError(err)
 		}
-		s.setNativeRuntime(nil)
 		s.Wool.Debug("stopped native redis: port released, data retained")
 		return s.Runtime.StopResponse()
 	}
@@ -309,11 +339,10 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	// Stopping an already-stopped handle is a no-op, and a handle from a failed
 	// Init still points at whatever that Init managed to spawn, so this is the
 	// retry path for both.
-	if nixr := s.nativeRuntime(); nixr != nil {
-		if err := nixr.Stop(ctx); err != nil {
+	if s.nativeRuntime() != nil {
+		if err := s.releaseNativeRuntime(ctx); err != nil {
 			return s.Runtime.DestroyError(err)
 		}
-		s.setNativeRuntime(nil)
 		return s.Runtime.DestroyResponse()
 	}
 	// A native invocation has no container to remove, and reaching for one would

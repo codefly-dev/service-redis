@@ -54,6 +54,10 @@ func init() {
 
 // fakeRedisMain never returns: this process is a redis stand-in, not a test run.
 func fakeRedisMain(mode string) {
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "%s is set, so this binary runs as a redis stand-in and needs a config path; unset it to run the tests\n", fakeRedisModeEnv)
+		os.Exit(2)
+	}
 	port, err := portFromRedisConfig(os.Args[1])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fake redis:", err)
@@ -303,14 +307,21 @@ func TestNativeLaunchRollsBackWhenReadinessIsCancelled(t *testing.T) {
 	// is about is exactly "spawned, not yet ready".
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	spawned := make(chan struct{})
 	go func() {
 		if _, ok := awaitOwnedPID(n); ok {
+			close(spawned)
 			cancel()
 		}
 	}()
 
 	start := time.Now()
 	err := n.launch(ctx)
+	select {
+	case <-spawned:
+	default:
+		t.Fatal("fixture never announced a server, so nothing was cancelled; this says nothing about rollback")
+	}
 	if err == nil {
 		t.Fatal("launch reported success against a server that never answered")
 	}
@@ -470,5 +481,37 @@ func TestNativeInitStateIsOwnerOnly(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("config permissions = %o, want 600", got)
+	}
+}
+
+// TestNativeConfigPersistsDatasetOnShutdown pins the half of the lifecycle
+// contract that the config, not the code, decides. Stop terminates the server,
+// and redis only writes an RDB on SIGTERM when a save point is configured — so
+// `save ""` here would turn every Stop into a silent wipe of the dataset while
+// the documented contract promised retention.
+func TestNativeConfigPersistsDatasetOnShutdown(t *testing.T) {
+	root := t.TempDir()
+	n := &nixRedis{
+		dataDir:    filepath.Join(root, "data"),
+		configPath: filepath.Join(root, "redis.conf"),
+		port:       16379,
+	}
+	if err := n.writeConfig(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(n.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(data)
+	if strings.Contains(config, `save ""`) {
+		t.Fatalf("config disables snapshots, so terminating the server discards the dataset:\n%s", config)
+	}
+	if !regexp.MustCompile(`(?m)^save \d+ \d+$`).MatchString(config) {
+		t.Fatalf("config has no save point, so SIGTERM writes no RDB:\n%s", config)
+	}
+	// The RDB has to land in the directory the lifecycle promises to retain.
+	if !strings.Contains(config, "dir "+strconv.Quote(n.dataDir)) {
+		t.Fatalf("config does not point the dataset at the retained data dir:\n%s", config)
 	}
 }

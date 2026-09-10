@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -193,5 +194,128 @@ func requireStartState(t *testing.T, rt *Runtime, want runtimev0.StartStatus_Sta
 	t.Helper()
 	if got := startState(t, rt); got != want {
 		t.Fatalf("start status = %v, want %v", got, want)
+	}
+}
+
+// TestRuntimeInitReleasesTheRuntimeItAlreadyOwns covers the re-Init leak: a
+// second Init used to overwrite the handle, dropping the only reference to a
+// live server that kept holding the assigned port. The release happens before
+// any other Init work, so an Init that fails afterwards still leaves nothing
+// behind — this one fails on its (deliberately empty) network mappings.
+func TestRuntimeInitReleasesTheRuntimeItAlreadyOwns(t *testing.T) {
+	rt, n, port := startedNativeRuntime(t)
+	pid := ownedPID(t, n)
+
+	resp, err := rt.Init(context.Background(), &runtimev0.InitRequest{
+		RuntimeContext: resources.NewRuntimeContextNix(),
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
+		t.Fatalf("Init status = %v, want ERROR on empty network mappings", state)
+	}
+	requireProcessGone(t, pid)
+	requirePortFree(t, port)
+	if rt.nativeRuntime() != nil {
+		t.Error("Init kept ownership of the runtime it released")
+	}
+}
+
+// TestRuntimeInitKeepsOwnershipWhenReleaseFails: an Init that cannot release
+// the incumbent must not proceed to start a second server, and must not lose
+// track of the one it failed to stop.
+func TestRuntimeInitKeepsOwnershipWhenReleaseFails(t *testing.T) {
+	rt := newLoadedRuntime(t)
+	rt.setNativeRuntime(&nixRedis{port: 6379, proc: stubborn{}})
+
+	resp, err := rt.Init(context.Background(), &runtimev0.InitRequest{
+		RuntimeContext: resources.NewRuntimeContextNix(),
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
+		t.Fatalf("Init status = %v, want ERROR", state)
+	}
+	if !strings.Contains(resp.GetStatus().GetMessage(), stubbornStopMessage) {
+		t.Errorf("Init message %q does not explain the failed release", resp.GetStatus().GetMessage())
+	}
+	if rt.nativeRuntime() == nil {
+		t.Fatal("Init dropped ownership of a runtime it could not stop")
+	}
+}
+
+// TestRuntimeStopKeepsRedisRunningWhenAskedTo: warm reuse is the documented
+// opt-out from releasing execution resources.
+func TestRuntimeStopKeepsRedisRunningWhenAskedTo(t *testing.T) {
+	rt, n, port := startedNativeRuntime(t)
+	pid := ownedPID(t, n)
+	rt.Settings.KeepRunning = true
+
+	resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if state := resp.GetStatus().GetState(); state != runtimev0.StopStatus_SUCCESS {
+		t.Fatalf("Stop status = %v (%s)", state, resp.GetStatus().GetMessage())
+	}
+	if !processAlive(pid) {
+		t.Fatal("keep-running Stop terminated the server anyway")
+	}
+	if rt.nativeRuntime() == nil {
+		t.Error("keep-running Stop gave up ownership of a server it left running")
+	}
+	requireRedisAnswers(t, port)
+
+	// Clearing the opt-in releases it, so the test does not leak the server.
+	rt.Settings.KeepRunning = false
+	if _, err = rt.Stop(context.Background(), &runtimev0.StopRequest{}); err != nil {
+		t.Fatalf("releasing Stop: %v", err)
+	}
+	requireProcessGone(t, pid)
+}
+
+// TestRuntimeConcurrentStopAndDestroyReleaseOnce: both arrive on their own gRPC
+// goroutine and both mutate the same handle. Run under -race, this is what
+// catches teardown state being written without a lock.
+func TestRuntimeConcurrentStopAndDestroyReleaseOnce(t *testing.T) {
+	rt, n, port := startedNativeRuntime(t)
+	pid := ownedPID(t, n)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	stopState := make(chan runtimev0.StopStatus_Status, 1)
+	destroyState := make(chan runtimev0.DestroyStatus_Status, 1)
+	go func() {
+		defer wg.Done()
+		resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+		if err != nil {
+			t.Error("Stop:", err)
+			return
+		}
+		stopState <- resp.GetStatus().GetState()
+	}()
+	go func() {
+		defer wg.Done()
+		resp, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		if err != nil {
+			t.Error("Destroy:", err)
+			return
+		}
+		destroyState <- resp.GetStatus().GetState()
+	}()
+	wg.Wait()
+
+	if state := <-stopState; state != runtimev0.StopStatus_SUCCESS {
+		t.Errorf("Stop status = %v", state)
+	}
+	if state := <-destroyState; state != runtimev0.DestroyStatus_SUCCESS {
+		t.Errorf("Destroy status = %v", state)
+	}
+	requireProcessGone(t, pid)
+	requirePortFree(t, port)
+	if rt.nativeRuntime() != nil {
+		t.Error("concurrent teardown left ownership behind")
 	}
 }

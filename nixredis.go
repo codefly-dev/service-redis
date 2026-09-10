@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
@@ -55,22 +56,40 @@ const (
 	redisReadyTimeout = 30 * time.Second
 	// redisProbeInterval spaces readiness probes.
 	redisProbeInterval = 500 * time.Millisecond
-	// nativeTeardownBudget bounds every teardown. It has to cover the runner's
-	// own SIGTERM-then-SIGKILL escalation, which is why it is comfortably longer
-	// than a probe interval.
-	nativeTeardownBudget = 15 * time.Second
+	// redisTeardownBudget bounds every teardown. Teardown deliberately ignores
+	// the caller's cancellation — a cancelled context is usually the reason we
+	// are tearing down, and skipping the stop is what orphans the process — so
+	// this budget is the only thing bounding how far a Stop can run past the
+	// caller's deadline. It is sized to just cover the runner's own
+	// SIGTERM-then-SIGKILL escalation (5s + 2s) plus room to observe the exit,
+	// and no longer.
+	redisTeardownBudget = 10 * time.Second
 )
+
+// redisRunner is the slice of a runner environment the native lifecycle needs.
+// newNixRedis is the only constructor and it always supplies a
+// runners.NixEnvironment, so production redis is always the nix-provisioned
+// binary; naming the two methods used keeps the lifecycle exercisable against a
+// real process on a host without nix.
+type redisRunner interface {
+	Init(ctx context.Context) error
+	NewProcess(bin string, args ...string) (runners.Proc, error)
+}
 
 // nixRedis runs a native redis server off a nix-provisioned binary.
 type nixRedis struct {
-	env        runners.RunnerEnvironment
+	env        redisRunner
 	flakeDir   string
 	dataDir    string
 	configPath string
 	port       uint16
 	password   string
 	out        io.Writer
-	proc       runners.Proc
+	// mu guards the lifecycle state below — proc, serverExit and the detached
+	// context. Stop mutates all of it and can arrive on any RPC goroutine, so a
+	// Stop racing a Destroy would otherwise be a data race on the handle itself.
+	mu   sync.Mutex
+	proc runners.Proc
 	// serverCtx is the context the redis process runs under. It MUST outlive
 	// Init: starting redis under the Init RPC's ctx kills it the instant Init
 	// returns and that ctx is cancelled. Cancelled only by Stop.
@@ -393,7 +412,7 @@ func (n *nixRedis) launch(ctx context.Context) (err error) {
 		}
 		// Teardown runs on its own budget: the caller's ctx is very often the
 		// reason we are rolling back, and a cancelled ctx must not skip the stop.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTeardownBudget)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisTeardownBudget)
 		defer cancel()
 		err = errors.Join(err, n.Stop(cleanupCtx))
 	}()
@@ -512,7 +531,13 @@ func (n *nixRedis) writeConfig() error {
 		"bind 127.0.0.1",
 		"protected-mode yes",
 		"dir " + strconv.Quote(n.dataDir),
-		`save ""`,
+		// Stop terminates this server, and the lifecycle contract is that
+		// stopping ends execution while the dataset survives. Redis only writes
+		// an RDB on SIGTERM when at least one save point is configured; with
+		// `save ""` the shutdown path skips the dump and the whole dataset goes
+		// with the process. The save point is what makes the retained data dir
+		// actually hold anything, and what a later Init reloads.
+		"save 60 1",
 		"appendonly no",
 		"daemonize no",
 	}
@@ -537,18 +562,23 @@ func (n *nixRedis) startServer(ctx context.Context) error {
 	}
 	// Run redis under a context that outlives Init — NOT the Init RPC ctx, which
 	// is cancelled the moment Init returns and would SIGTERM the server.
-	n.serverCtx, n.serverCancel = context.WithCancel(context.Background())
-	if err := proc.Start(n.serverCtx); err != nil {
-		n.serverCancel()
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	n.mu.Lock()
+	n.serverCtx, n.serverCancel = serverCtx, serverCancel
+	n.mu.Unlock()
+	if err := proc.Start(serverCtx); err != nil {
+		serverCancel()
 		return fmt.Errorf("start redis: %w", err)
 	}
-	n.proc = proc
 	exit := make(chan error, 1)
 	go func() {
 		exit <- proc.Wait(context.Background())
 		close(exit)
 	}()
+	n.mu.Lock()
+	n.proc = proc
 	n.serverExit = exit
+	n.mu.Unlock()
 	return nil
 }
 
@@ -576,8 +606,11 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 			}
 			return nil
 		}
+		n.mu.Lock()
+		exit := n.serverExit
+		n.mu.Unlock()
 		select {
-		case exitErr, ok := <-n.serverExit:
+		case exitErr, ok := <-exit:
 			if !ok {
 				exitErr = nil
 			}
@@ -604,12 +637,8 @@ func (n *nixRedis) probe(ctx context.Context, addr string) error {
 	}
 	buf := make([]byte, 16)
 	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-	read, err := conn.Read(buf)
-	if err != nil {
+	if _, err = conn.Read(buf); err != nil {
 		return err
-	}
-	if read == 0 {
-		return fmt.Errorf("empty reply from %s", addr)
 	}
 	return nil
 }
@@ -617,8 +646,11 @@ func (n *nixRedis) probe(ctx context.Context, addr string) error {
 // exited reports the process's terminal result if it has already exited,
 // without blocking.
 func (n *nixRedis) exited() (error, bool) {
+	n.mu.Lock()
+	exit := n.serverExit
+	n.mu.Unlock()
 	select {
-	case err, ok := <-n.serverExit:
+	case err, ok := <-exit:
 		if !ok {
 			return nil, true
 		}
@@ -646,15 +678,17 @@ func redisExitedBeforeReady(err error) error {
 // and waitReady has finished observing it, so this goroutine is its sole
 // remaining reader.
 func (n *nixRedis) Supervise(onExit func(error)) {
+	n.mu.Lock()
 	exit := n.serverExit
-	if exit == nil {
-		return
-	}
 	// Stop cancels serverCtx before terminating the process, so a cancelled
 	// context is the authoritative "this shutdown was orderly" signal.
 	var stopped <-chan struct{}
 	if n.serverCtx != nil {
 		stopped = n.serverCtx.Done()
+	}
+	n.mu.Unlock()
+	if exit == nil {
+		return
 	}
 	go func() {
 		err, ok := <-exit
@@ -684,6 +718,12 @@ func (n *nixRedis) Supervise(onExit func(error)) {
 // still be alive; dropping the claim hands the data dir to another invocation
 // while that process still has it open.
 func (n *nixRedis) Stop(ctx context.Context) error {
+	// Held for the whole teardown: a concurrent Stop and Destroy would otherwise
+	// both read the handle, both signal, and both clear it. Serialized, the
+	// second one finds no process and is the no-op it should be.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if n.serverCancel != nil {
 		n.serverCancel()
 	}
@@ -691,7 +731,7 @@ func (n *nixRedis) Stop(ctx context.Context) error {
 		// Teardown gets its own bounded budget and ignores the caller's
 		// cancellation: a cancelled ctx is very often the reason we are tearing
 		// down, and skipping the stop is exactly what orphans the process.
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTeardownBudget)
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisTeardownBudget)
 		defer cancel()
 		stopErr := n.proc.Stop(stopCtx)
 		if n.serverExit != nil {
