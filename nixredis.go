@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -88,17 +89,15 @@ func newNixRedis(ctx context.Context, stateKey string, port uint16, password str
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
-		return nil, fmt.Errorf("create redis runtime root: %w", err)
+	if err := prepareRuntimeRoot(runtimeRoot); err != nil {
+		return nil, err
 	}
-	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
-		return nil, fmt.Errorf("secure redis runtime root: %w", err)
-	}
-	owner, err := claimRuntimeRoot(runtimeRoot)
+	owner, err := claimRuntimeRoot(ctx, runtimeRoot, runtimeRootClaimTimeout)
 	if err != nil {
 		return nil, err
 	}
-	sharedNixRoot, flakeDir, err := materializeSharedFlake()
+	releaseLegacyNixCache(runtimeRoot, out)
+	sharedNixRoot, flakeDir, err := materializeSharedFlake(ctx, out)
 	if err != nil {
 		releaseRuntimeRoot(owner)
 		return nil, err
@@ -159,23 +158,74 @@ func redisCacheRoot() (string, error) {
 	return filepath.Join(cache, "codefly", "redis"), nil
 }
 
+// runtimeRootClaimTimeout bounds the wait for a previous invocation of the same
+// reusable state to finish shutting down. Restarting a run — stop it, start it
+// again — hands the root over while the old agent process is still exiting and
+// still holds the lock, and that handover is not a collision. Only a peer that
+// is still holding the root after this long is one.
+const runtimeRootClaimTimeout = 5 * time.Second
+
+// prepareRuntimeRoot creates the invocation's mutable root and refuses to use
+// one that is not a real directory we own. MkdirAll and Chmod both follow
+// symlinks, so without the Lstat a pre-planted symlink at this path redirects
+// the credential-bearing config into whatever it points at — and the path is
+// predictable, being derived from a hash of public inputs.
+func prepareRuntimeRoot(runtimeRoot string) error {
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		return fmt.Errorf("create redis runtime root: %w", err)
+	}
+	info, err := os.Lstat(runtimeRoot)
+	if err != nil {
+		return fmt.Errorf("inspect redis runtime root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("redis runtime root %s is a symlink; refusing to write credentials through it", runtimeRoot)
+	}
+	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
+		return fmt.Errorf("secure redis runtime root: %w", err)
+	}
+	return nil
+}
+
 // claimRuntimeRoot takes the invocation's exclusive lock on its mutable state.
 // Two invocations only ever land on the same root when they share a state key,
 // which means an operator asked for reusable state; adopting it concurrently is
 // ambiguous — one would overwrite the other's config while it is being read —
-// so the second is refused with the way out.
-func claimRuntimeRoot(runtimeRoot string) (*flock.Flock, error) {
+// so the second is refused with the way out, but only after waiting long enough
+// for an ordinary restart to complete its handover.
+func claimRuntimeRoot(ctx context.Context, runtimeRoot string, wait time.Duration) (*flock.Flock, error) {
 	owner := flock.New(filepath.Join(runtimeRoot, ".owner.lock"), flock.SetPermissions(0o600))
-	held, err := owner.TryLock()
-	if err != nil {
-		_ = owner.Close()
-		return nil, fmt.Errorf("claim redis runtime root %s: %w", runtimeRoot, err)
+	claimCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	held, err := owner.TryLockContext(claimCtx, 50*time.Millisecond)
+	if held {
+		return owner, nil
 	}
-	if !held {
-		_ = owner.Close()
-		return nil, fmt.Errorf("redis runtime state %s is already in use by another codefly invocation: give this run its own naming scope to isolate it", runtimeRoot)
+	_ = owner.Close()
+	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("redis runtime state %s is still held by another codefly invocation after %s: stop that run, or give this one its own naming scope to isolate it", runtimeRoot, wait)
 	}
-	return owner, nil
+	return nil, fmt.Errorf("claim redis runtime root %s: %w", runtimeRoot, err)
+}
+
+// releaseLegacyNixCache drops the per-service nix state written by releases
+// that kept the flake and its materialization under the service's own runtime
+// root. That materialization is rooted by a nix profile registered under
+// /nix/var/nix/gcroots/auto, so leaving it behind pins its whole closure —
+// gigabytes per service — against nix-collect-garbage with nothing referencing
+// it. Removing the profile makes the auto-root dangling, which nix then
+// collects. Only these two agent-owned directories are touched; redis.conf and
+// the data dir are never candidates.
+//
+// Best effort by design: this reclaims disk, and failing a service start over
+// disk reclamation would be a worse outcome than the leak. The failure is
+// reported rather than swallowed so a host that keeps leaking is diagnosable.
+func releaseLegacyNixCache(runtimeRoot string, out io.Writer) {
+	for _, legacy := range []string{"nix", ".nix-cache"} {
+		if err := os.RemoveAll(filepath.Join(runtimeRoot, legacy)); err != nil && out != nil {
+			_, _ = fmt.Fprintf(out, "could not release legacy nix state %s: %v\n", filepath.Join(runtimeRoot, legacy), err)
+		}
+	}
 }
 
 func releaseRuntimeRoot(owner *flock.Flock) {
@@ -189,9 +239,12 @@ func releaseRuntimeRoot(owner *flock.Flock) {
 // so they are shared rather than duplicated per session — a fresh scope pays
 // for redis.conf and a data dir, not for another nix download.
 //
-// The two files are written through a rename so a concurrent nix evaluation
-// reads either the previous or the complete new file, never a truncated one.
-func materializeSharedFlake() (string, string, error) {
+// The write happens under the shared lock and only when the contents differ,
+// which after the first invocation is never. Nix consumes flakeDir as a
+// `path:` flake and copies the WHOLE directory into the store, so a transient
+// file there changes the flake's hash: nothing may appear in it that is not
+// part of the flake, and no write may overlap an evaluation.
+func materializeSharedFlake(ctx context.Context, out io.Writer) (string, string, error) {
 	cache, err := redisCacheRoot()
 	if err != nil {
 		return "", "", err
@@ -202,16 +255,59 @@ func materializeSharedFlake() (string, string, error) {
 	if err := os.MkdirAll(flakeDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create nix flake dir: %w", err)
 	}
-	for name, contents := range map[string]string{"flake.nix": redisFlakeNix, "flake.lock": redisFlakeLock} {
-		if err := writeFileAtomic(filepath.Join(flakeDir, name), []byte(contents), 0o644); err != nil {
-			return "", "", fmt.Errorf("write %s: %w", name, err)
+	err = withSharedNixLock(ctx, sharedNixRoot, out, func() error {
+		for name, contents := range map[string]string{"flake.nix": redisFlakeNix, "flake.lock": redisFlakeLock} {
+			path := filepath.Join(flakeDir, name)
+			if current, readErr := os.ReadFile(path); readErr == nil && string(current) == contents {
+				continue
+			}
+			if writeErr := os.WriteFile(path, []byte(contents), 0o644); writeErr != nil {
+				return fmt.Errorf("write %s: %w", name, writeErr)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return "", "", err
 	}
 	return sharedNixRoot, flakeDir, nil
 }
 
+// withSharedNixLock serializes every access to the shared nix root: writing the
+// flake, and evaluating it. Materialization writes a devshell env cache and a
+// GC-root profile that concurrent evaluations would race on, and an evaluation
+// must never observe a flake mid-write.
+//
+// The wait is deliberately bounded only by ctx. A peer holding this lock is
+// doing the exact materialization the waiter would otherwise do itself — on a
+// cold binary cache that is minutes — so failing early would trade a wait for a
+// duplicated download. It announces the wait instead of looking like a hang.
+func withSharedNixLock(ctx context.Context, sharedNixRoot string, out io.Writer, operation func() error) error {
+	lock := flock.New(filepath.Join(sharedNixRoot, "materialize.lock"), flock.SetPermissions(0o600))
+	held, err := lock.TryLock()
+	if err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("lock shared nix root %s: %w", sharedNixRoot, err)
+	}
+	if !held {
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "waiting for another codefly invocation to materialize the nix redis environment in %s\n", sharedNixRoot)
+		}
+		if _, err = lock.TryLockContext(ctx, 250*time.Millisecond); err != nil {
+			_ = lock.Close()
+			return fmt.Errorf("lock shared nix root %s: %w", sharedNixRoot, err)
+		}
+	}
+	defer func() {
+		_ = lock.Unlock()
+		_ = lock.Close()
+	}()
+	return operation()
+}
+
 // writeFileAtomic replaces path with contents in one rename, so a reader either
-// sees the previous file or the complete new one.
+// sees the previous file or the complete new one. Only for mutable files whose
+// directory is not consumed wholesale by another tool — see materializeSharedFlake.
 func writeFileAtomic(path string, contents []byte, perm os.FileMode) error {
 	dir, name := filepath.Split(path)
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp")
@@ -235,7 +331,23 @@ func writeFileAtomic(path string, contents []byte, perm os.FileMode) error {
 
 // Init materializes the nix env, locates redis-server, launches it bound to the
 // assigned port, and waits until it answers PING.
-func (n *nixRedis) Init(ctx context.Context) error {
+//
+// A failed Init releases everything it acquired, including the runtime-root
+// claim taken by newNixRedis. The caller drops the *nixRedis on error and can
+// never call Stop on it, so anything still held here is held until the agent
+// process exits: the claim would make every later attempt in this process fail
+// with "already in use by another codefly invocation" — naming a cause that is
+// not the real one and prescribing a fix that cannot work — and a redis started
+// just before a readiness timeout would keep running, holding the port and the
+// data dir, unreferenced.
+func (n *nixRedis) Init(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			// Not ctx: Init may be failing *because* ctx was cancelled, and the
+			// process still has to be reaped.
+			_ = n.Stop(context.Background())
+		}
+	}()
 	if err := n.initSharedEnv(ctx); err != nil {
 		return err
 	}
@@ -254,25 +366,16 @@ func (n *nixRedis) Init(ctx context.Context) error {
 	return n.waitReady(ctx)
 }
 
-// initSharedEnv materializes the shared nix env under an exclusive lock.
-// Materialization writes a devshell env cache and a GC-root profile in the
-// shared root; concurrent invocations evaluating the same flake would race on
-// both. The lock is held only for materialization — the per-session config and
-// data below runtimeRoot are never covered by it.
+// initSharedEnv materializes the shared nix env under the shared lock. The
+// lock covers the shared root only — the per-session config and data below
+// runtimeRoot are never held by it.
 func (n *nixRedis) initSharedEnv(ctx context.Context) error {
-	materialization := flock.New(filepath.Join(n.sharedNixRoot, "materialize.lock"), flock.SetPermissions(0o600))
-	if _, err := materialization.TryLockContext(ctx, 50*time.Millisecond); err != nil {
-		_ = materialization.Close()
-		return fmt.Errorf("lock nix redis materialization in %s: %w", n.sharedNixRoot, err)
-	}
-	defer func() {
-		_ = materialization.Unlock()
-		_ = materialization.Close()
-	}()
-	if err := n.env.Init(ctx); err != nil {
-		return fmt.Errorf("materialize nix redis env: %w", err)
-	}
-	return nil
+	return withSharedNixLock(ctx, n.sharedNixRoot, n.out, func() error {
+		if err := n.env.Init(ctx); err != nil {
+			return fmt.Errorf("materialize nix redis env: %w", err)
+		}
+		return nil
+	})
 }
 
 // resolveStore locates the nix-store redis-server binary by absolute path —
@@ -366,20 +469,28 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 	return fmt.Errorf("redis did not become ready on %s: %w", addr, lastErr)
 }
 
-// Stop terminates the redis server process and releases this invocation's claim
-// on its runtime root. Config and data are left in place: another invocation's
-// state is never reachable from here, and this invocation's own state is what a
+// Stop terminates the redis server process and then releases this invocation's
+// claim on its runtime root — in that order, so the claim outlives the resource
+// it protects. Config and data are left in place: another invocation's state is
+// never reachable from here, and this invocation's own state is what a
 // same-scope restart is meant to reuse.
 func (n *nixRedis) Stop(ctx context.Context) error {
 	if n.serverCancel != nil {
 		n.serverCancel()
 	}
+	if n.proc != nil {
+		if err := n.proc.Stop(ctx); err != nil {
+			// Keep the claim. serverCancel only *requests* termination, so a
+			// server we cannot confirm dead may still hold the data dir, and
+			// handing the root to another invocation now is precisely the
+			// collision the claim exists to prevent.
+			return err
+		}
+		n.proc = nil
+	}
 	if n.owner != nil {
 		releaseRuntimeRoot(n.owner)
 		n.owner = nil
 	}
-	if n.proc == nil {
-		return nil
-	}
-	return n.proc.Stop(ctx)
+	return nil
 }

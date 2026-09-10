@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
+	"github.com/gofrs/flock"
 )
 
 // TestNixRedisConcurrentInvocationsAreIsolated runs two real nix-provisioned
@@ -63,11 +65,17 @@ func TestNixRedisConcurrentInvocationsAreIsolated(t *testing.T) {
 	}
 	wg.Wait()
 
-	for i, server := range servers {
+	// t.Cleanup runs LIFO, so the removal is registered FIRST and the stop
+	// second: the server is reaped before its state is deleted. Registering
+	// every session before asserting on any error keeps a failure in one from
+	// stranding a claimed, populated root belonging to the other.
+	for _, server := range servers {
 		if server != nil {
-			t.Cleanup(func() { _ = server.Stop(context.Background()) })
 			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(server.configPath)) })
+			t.Cleanup(func() { _ = server.Stop(context.Background()) })
 		}
+	}
+	for i := range servers {
 		if errs[i] != nil {
 			t.Fatalf("session %d: %v", i, errs[i])
 		}
@@ -124,7 +132,7 @@ func TestNixRedisConcurrentInvocationsAreIsolated(t *testing.T) {
 	}
 
 	// The stopped invocation released its claim, so the same scope is reusable.
-	reclaimed, err := claimRuntimeRoot(filepath.Dir(servers[0].configPath))
+	reclaimed, err := claimRuntimeRoot(ctx, filepath.Dir(servers[0].configPath), time.Second)
 	if err != nil {
 		t.Fatalf("a stopped invocation kept ownership of its runtime root: %v", err)
 	}
@@ -192,4 +200,75 @@ func assertConfigRequires(t *testing.T, configPath, password string) {
 	if want := "requirepass " + fmt.Sprintf("%q", password); !strings.Contains(string(data), want) {
 		t.Fatalf("%s does not carry its own credentials; it was overwritten by another invocation:\n%s", configPath, data)
 	}
+}
+
+// A failed Init must hand back everything newNixRedis took. The caller drops
+// the *nixRedis on error and can never call Stop on it, so a claim retained
+// here outlives the attempt: the next Init in this process would be refused
+// with "already in use by another codefly invocation", blaming a peer that does
+// not exist for what was a transient materialization failure.
+func TestNixRedisFailedInitReleasesItsClaim(t *testing.T) {
+	if !runners.CheckNixInstalled() {
+		t.Skipf("nix is not installed: %s", runners.NixInstallCommand())
+	}
+
+	location := t.TempDir()
+	server, err := newNixRedis(context.Background(),
+		redisStateKey(location, "inv"+uniqueScopeSuffix(t)+"fail"), freePort(t), "unused", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Dir(server.configPath)
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeRoot) })
+
+	// Hold the shared nix lock so Init cannot materialize, and give it a
+	// cancelled context so it fails at that point instead of waiting.
+	blocker := flock.New(filepath.Join(server.sharedNixRoot, "materialize.lock"), flock.SetPermissions(0o600))
+	held, err := blocker.TryLock()
+	if err != nil || !held {
+		t.Fatalf("could not hold the shared nix lock: held=%v err=%v", held, err)
+	}
+	defer func() { _ = blocker.Unlock(); _ = blocker.Close() }()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err = server.Init(cancelled); err == nil {
+		t.Fatal("Init reported success while the shared nix root was locked away from it")
+	}
+
+	reclaimed, err := claimRuntimeRoot(context.Background(), runtimeRoot, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("a failed Init leaked the runtime-root claim: %v", err)
+	}
+	releaseRuntimeRoot(reclaimed)
+}
+
+// stubborn is a process that refuses to confirm it stopped.
+type stubborn struct{ runners.Proc }
+
+func (stubborn) Stop(context.Context) error { return errors.New("process did not terminate") }
+
+// serverCancel only *requests* termination. Releasing the claim before the
+// process is confirmed gone hands the root — and the data dir the server still
+// has open — to another invocation, which is the collision the claim exists to
+// prevent.
+func TestNixRedisStopKeepsItsClaimWhenTheServerWillNotDie(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	owner, err := claimRuntimeRoot(context.Background(), runtimeRoot, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &nixRedis{owner: owner, proc: stubborn{}, configPath: filepath.Join(runtimeRoot, "redis.conf")}
+
+	if err = server.Stop(context.Background()); err == nil {
+		t.Fatal("Stop reported success for a process it could not terminate")
+	}
+	if server.owner == nil {
+		t.Fatal("Stop released the claim while its server may still be running")
+	}
+
+	if _, err = claimRuntimeRoot(context.Background(), runtimeRoot, 200*time.Millisecond); err == nil {
+		t.Fatal("another invocation adopted a root whose server was never confirmed dead")
+	}
+	releaseRuntimeRoot(server.owner)
 }
