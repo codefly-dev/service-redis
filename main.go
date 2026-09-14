@@ -87,8 +87,8 @@ func parseRuntimeImageLock(content []byte) (*managedRuntimeImage, error) {
 	}
 	seen := map[string]bool{}
 	for _, platform := range lock.Platforms {
-		os, architecture, ok := strings.Cut(platform, "/")
-		if !ok || os == "" || architecture == "" {
+		osName, architecture, ok := strings.Cut(platform, "/")
+		if !ok || osName == "" || architecture == "" {
 			return nil, fmt.Errorf("runtime image platform %q must be in os/arch form", platform)
 		}
 		if seen[platform] {

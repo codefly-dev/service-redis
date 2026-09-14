@@ -115,9 +115,14 @@ jobs:
         run: |
           set -euo pipefail
           expected=$(jq -er '.digest' runtime-image.json)
+          # The platform list comes from the lock rather than being repeated
+          # here: building exactly the platforms the lock declares is what makes
+          # the digest comparison below prove that the declared platforms are
+          # the platforms the published index actually ships.
+          platforms=$(jq -er '.platforms | join(",")' runtime-image.json)
           docker buildx build --no-cache \
             --build-arg SOURCE_DATE_EPOCH=0 \
-            --platform linux/amd64,linux/arm64 \
+            --platform "$platforms" \
             --provenance=false --sbom=false \
             --output type=oci,dest=/tmp/runtime-oci.tar,rewrite-timestamp=true \
             --metadata-file /tmp/runtime-meta.json \

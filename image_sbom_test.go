@@ -15,10 +15,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
@@ -33,18 +31,18 @@ func requireImageSBOMInfrastructure(t *testing.T, missing string) {
 	t.Skipf("skipping: %s", missing)
 }
 
-// requireDockerForImageSBOM gates the scanning tests. The scanner reaches the
-// registry through docker, and falls back to the managed syft container when no
-// syft is installed, so docker is the one hard requirement.
+// requireDockerForImageSBOM gates the scanning tests. They pull from the
+// registry, so they are opt-in rather than merely docker-dependent: leaving
+// REDIS_IMAGE_SBOM_TESTS unset keeps `go test ./...` off the network, where a
+// machine with a running daemon but no connectivity would otherwise fail rather
+// than skip.
 func requireDockerForImageSBOM(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("docker"); err != nil {
-		requireImageSBOMInfrastructure(t, "docker is not on PATH")
+	if os.Getenv("REDIS_IMAGE_SBOM_TESTS") == "" {
+		t.Skip("skipping: set REDIS_IMAGE_SBOM_TESTS=required to inventory the shipped image")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "docker", "info").CombinedOutput(); err != nil {
-		requireImageSBOMInfrastructure(t, fmt.Sprintf("docker is not usable: %v (%s)", err, strings.TrimSpace(string(out))))
+	if reason, ok := dockerUsable(); !ok {
+		requireImageSBOMInfrastructure(t, reason)
 	}
 }
 
@@ -104,6 +102,34 @@ func TestRuntimeImageSubjectsCoverEveryShippedPlatform(t *testing.T) {
 		if subject.GetDigest() != "" {
 			t.Fatalf("subject %d digest = %q, want it left to the resolved child manifest", i, subject.GetDigest())
 		}
+	}
+}
+
+// Enumerating subjects reads the service identity, which exists only after
+// Load. Reading it unloaded panics, and the recovered panic returns an empty
+// response with no error — absent evidence dressed as success. Callers reach
+// Builder.SBOM through a pass-through that does not load (core
+// services.BuilderInstance.SBOM), so the unloaded call is reachable.
+func TestImageScopeWithoutLoadReportsAnError(t *testing.T) {
+	builder := NewBuilder()
+
+	response, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{
+		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+	})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	if response == nil {
+		t.Fatal("SBOM returned no response")
+	}
+	if state := response.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+		t.Fatalf("state = %s, want ERROR", state)
+	}
+	if response.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		t.Fatalf("scope = %s, want image", response.GetScope())
+	}
+	if len(response.GetImages()) != 0 {
+		t.Fatalf("unloaded service returned %d inventories", len(response.GetImages()))
 	}
 }
 
@@ -180,7 +206,7 @@ func TestEnumeratedSubjectsSatisfyCoverage(t *testing.T) {
 }
 
 func childDigest(i int) string {
-	return "sha256:" + strings.Repeat(string(rune('a'+i)), 64)
+	return fmt.Sprintf("sha256:%064x", i+1)
 }
 
 func TestImageSBOMCoversEveryShippedPlatform(t *testing.T) {

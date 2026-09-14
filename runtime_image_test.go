@@ -101,21 +101,21 @@ func TestDefaultImageMatchesRuntimeImageLock(t *testing.T) {
 	}
 }
 
-// The published image is built for exactly the platforms CI builds. A platform
-// added to the build without being added here would ship with no image SBOM
-// subject, and so with no evidence, while coverage still reported complete.
-func TestRuntimeImagePlatformsMatchTheBuiltPlatforms(t *testing.T) {
+// The build must derive its platform list from the lock. A second hardcoded
+// list could drift from it, and reconciling the two by hand invites the wrong
+// correction: editing the lock down to match a narrower build silently drops a
+// shipped platform from image SBOM coverage while CI stays green.
+func TestRuntimeImagePlatformsAreDerivedFromTheLock(t *testing.T) {
 	workflow, err := os.ReadFile(".github/workflows/ci.yml")
 	if err != nil {
 		t.Fatalf("read ci workflow: %v", err)
 	}
-	_, rest, found := strings.Cut(string(workflow), "--platform ")
-	if !found {
-		t.Fatal("ci workflow builds no explicit --platform list")
+	content := string(workflow)
+	if !strings.Contains(content, `jq -er '.platforms | join(",")' runtime-image.json`) {
+		t.Error("ci workflow does not derive --platform from runtime-image.json")
 	}
-	built, _, _ := strings.Cut(rest, " ")
-	if want := strings.Join(runtimeImage.Platforms, ","); built != want {
-		t.Fatalf("ci builds %q, runtime-image.json declares %q", built, want)
+	if strings.Contains(content, "--platform linux/") {
+		t.Error("ci workflow hardcodes a platform list that can drift from runtime-image.json")
 	}
 }
 

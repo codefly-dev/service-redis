@@ -76,6 +76,13 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 	}
 	subjects := req.GetSubjects()
 	if len(subjects) == 0 {
+		// Enumerating subjects needs the service identity evidence is attributed
+		// to, and that only exists once the service is loaded. Reading it
+		// unloaded panics, and a recovered panic returns an empty response with
+		// no error, which reads as absent evidence rather than a failure.
+		if s.Identity == nil {
+			return s.Builder.SBOMImageError(fmt.Errorf("image SBOM subjects can only be enumerated after the service is loaded"))
+		}
 		subjects = s.runtimeImageSubjects()
 	}
 	return s.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
