@@ -115,9 +115,14 @@ jobs:
         run: |
           set -euo pipefail
           expected=$(jq -er '.digest' runtime-image.json)
+          # The platform list comes from the lock rather than being repeated
+          # here: building exactly the platforms the lock declares is what makes
+          # the digest comparison below prove that the declared platforms are
+          # the platforms the published index actually ships.
+          platforms=$(jq -er '.platforms | join(",")' runtime-image.json)
           docker buildx build --no-cache \
             --build-arg SOURCE_DATE_EPOCH=0 \
-            --platform linux/amd64,linux/arm64 \
+            --platform "$platforms" \
             --provenance=false --sbom=false \
             --output type=oci,dest=/tmp/runtime-oci.tar,rewrite-timestamp=true \
             --metadata-file /tmp/runtime-meta.json \
@@ -147,3 +152,19 @@ jobs:
             echo "publish it to the public registry before pinning the digest" >&2
             exit 1
           fi
+
+      # setup-go's cache corrupts the downloaded toolchain module on restore, so
+      # the shared go-service-ci workflow disables it too.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Conformance alone proves the agent's claims are self-consistent; only a
+      # real scan proves the shipped image has evidence. REDIS_IMAGE_SBOM_TESTS
+      # =required turns a missing scanner into a failure so this cannot pass by
+      # skipping.
+      - name: Image SBOM covers every shipped platform
+        env:
+          REDIS_IMAGE_SBOM_TESTS: required
+        run: go test -run TestImageSBOM -count=1 -v -timeout 30m ./...

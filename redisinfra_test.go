@@ -35,15 +35,25 @@ func requireInfrastructure(t *testing.T, missing string) {
 	t.Skipf("skipping: %s", missing)
 }
 
-func requireDocker(t *testing.T) {
-	t.Helper()
+// dockerUsable reports whether a docker daemon can be reached, and why not when
+// it cannot. The infrastructure gates probe it identically and differ only in
+// what an unusable daemon means for the suite that asked.
+func dockerUsable() (string, bool) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		requireInfrastructure(t, "docker is not on PATH")
+		return "docker is not on PATH", false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, "docker", "info").CombinedOutput(); err != nil {
-		requireInfrastructure(t, fmt.Sprintf("docker is not usable: %v (%s)", err, strings.TrimSpace(string(out))))
+		return fmt.Sprintf("docker is not usable: %v (%s)", err, strings.TrimSpace(string(out))), false
+	}
+	return "", true
+}
+
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if reason, ok := dockerUsable(); !ok {
+		requireInfrastructure(t, reason)
 	}
 }
 
