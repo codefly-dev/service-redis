@@ -12,9 +12,14 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/agents/services/sbom"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 )
+
+// runtimeImageRole is the role every image this service owns plays; redis ships
+// a single runtime image with no init, migration, or sidecar companions.
+const runtimeImageRole = "runtime"
 
 type Builder struct {
 	*services.DefaultBuilder
@@ -59,10 +64,38 @@ func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*buil
 	return s.Builder.AuditContainer(ctx, req, image.FullName())
 }
 
-func (s *Builder) SBOM(ctx context.Context, _ *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+// SBOM serves the source inventory by default and digest-bound image evidence
+// under image scope. Redis selects its runtime image instead of building one,
+// so the reference is known without a build and the agent can enumerate its own
+// subjects when the caller supplies none.
+func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	return s.Builder.SBOMContainer(ctx, image.FullName())
+	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		return s.Builder.SBOMContainer(ctx, image.FullName())
+	}
+	subjects := req.GetSubjects()
+	if len(subjects) == 0 {
+		subjects = s.runtimeImageSubjects()
+	}
+	return s.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
+}
+
+// runtimeImageSubjects names one subject per shipped platform. Digest stays
+// unset because the pinned reference addresses a manifest index: the scanner
+// resolves each platform to its own child manifest and binds evidence to that
+// child digest, which never equals the index digest a subject could carry.
+func (s *Builder) runtimeImageSubjects() []*builderv0.ImageSubject {
+	subjects := make([]*builderv0.ImageSubject, 0, len(runtimeImage.Platforms))
+	for _, platform := range runtimeImage.Platforms {
+		subjects = append(subjects, &builderv0.ImageSubject{
+			Reference: image.FullName(),
+			Platform:  platform,
+			Role:      runtimeImageRole,
+			Service:   s.Unique(),
+		})
+	}
+	return subjects
 }
 
 // Upgrade reports a newer redis tag (within current major unless --major).

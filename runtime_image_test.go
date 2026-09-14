@@ -10,7 +10,8 @@ func TestParseRuntimeImageLock(t *testing.T) {
 	got, err := parseRuntimeImageLock([]byte(`{
 		"name": "docker.io/codeflydev/redis",
 		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
-		"digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
+		"digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907",
+		"platforms": ["linux/amd64", "linux/arm64"]
 	}`))
 	if err != nil {
 		t.Fatalf("parseRuntimeImageLock: %v", err)
@@ -21,6 +22,44 @@ func TestParseRuntimeImageLock(t *testing.T) {
 	}
 	if got.Tag != "redis-8.8.0-openssl-3.5.8-r0-alpine3.23" {
 		t.Fatalf("Tag = %q", got.Tag)
+	}
+	if strings.Join(got.Platforms, ",") != "linux/amd64,linux/arm64" {
+		t.Fatalf("Platforms = %v", got.Platforms)
+	}
+}
+
+func TestParseRuntimeImageLockRejectsMissingPlatforms(t *testing.T) {
+	_, err := parseRuntimeImageLock([]byte(`{
+		"name": "docker.io/codeflydev/redis",
+		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
+		"digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907"
+	}`))
+	if err == nil || err.Error() != "runtime image platforms are required" {
+		t.Fatalf("err = %v, want runtime image platforms are required", err)
+	}
+}
+
+func TestParseRuntimeImageLockRejectsMalformedPlatform(t *testing.T) {
+	_, err := parseRuntimeImageLock([]byte(`{
+		"name": "docker.io/codeflydev/redis",
+		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
+		"digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907",
+		"platforms": ["amd64"]
+	}`))
+	if err == nil || err.Error() != `runtime image platform "amd64" must be in os/arch form` {
+		t.Fatalf("err = %v, want malformed platform rejection", err)
+	}
+}
+
+func TestParseRuntimeImageLockRejectsDuplicatePlatform(t *testing.T) {
+	_, err := parseRuntimeImageLock([]byte(`{
+		"name": "docker.io/codeflydev/redis",
+		"tag": "redis-8.8.0-openssl-3.5.8-r0-alpine3.23",
+		"digest": "sha256:254a28dad5239310b81ee9246761f825d055675961c7f960bb9a8a5bc43fd907",
+		"platforms": ["linux/amd64", "linux/amd64"]
+	}`))
+	if err == nil || err.Error() != `runtime image platform "linux/amd64" is duplicated` {
+		t.Fatalf("err = %v, want duplicate platform rejection", err)
 	}
 }
 
@@ -54,8 +93,29 @@ func TestDefaultImageMatchesRuntimeImageLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseRuntimeImageLock: %v", err)
 	}
-	if *expected != *image {
-		t.Fatalf("image = %+v, want %+v", image, expected)
+	if *expected.DockerImage != *image {
+		t.Fatalf("image = %+v, want %+v", image, expected.DockerImage)
+	}
+	if strings.Join(expected.Platforms, ",") != strings.Join(runtimeImage.Platforms, ",") {
+		t.Fatalf("platforms = %v, want %v", runtimeImage.Platforms, expected.Platforms)
+	}
+}
+
+// The published image is built for exactly the platforms CI builds. A platform
+// added to the build without being added here would ship with no image SBOM
+// subject, and so with no evidence, while coverage still reported complete.
+func TestRuntimeImagePlatformsMatchTheBuiltPlatforms(t *testing.T) {
+	workflow, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("read ci workflow: %v", err)
+	}
+	_, rest, found := strings.Cut(string(workflow), "--platform ")
+	if !found {
+		t.Fatal("ci workflow builds no explicit --platform list")
+	}
+	built, _, _ := strings.Cut(rest, " ")
+	if want := strings.Join(runtimeImage.Platforms, ","); built != want {
+		t.Fatalf("ci builds %q, runtime-image.json declares %q", built, want)
 	}
 }
 

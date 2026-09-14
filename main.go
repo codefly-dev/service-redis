@@ -43,15 +43,27 @@ type Settings struct {
 // The managed image is the official redis Alpine image rebuilt with patched
 // OpenSSL (libcrypto3/libssl3 >= 3.5.8-r0). The nix runtime provisions redis
 // from nix/flake.nix, keeping both runtimes at parity.
-var image = shared.Must(parseRuntimeImageLock(runtimeImageLockJSON))
+var runtimeImage = shared.Must(parseRuntimeImageLock(runtimeImageLockJSON))
+
+var image = runtimeImage.DockerImage
 
 type runtimeImageLock struct {
-	Name   string `json:"name"`
-	Tag    string `json:"tag"`
-	Digest string `json:"digest"`
+	Name      string   `json:"name"`
+	Tag       string   `json:"tag"`
+	Digest    string   `json:"digest"`
+	Platforms []string `json:"platforms"`
 }
 
-func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
+// managedRuntimeImage is the pinned image together with the platforms it ships.
+// The digest addresses a manifest index, so the platform list is what says how
+// many images actually ship behind it, and image SBOM evidence owes one subject
+// to each of them.
+type managedRuntimeImage struct {
+	*resources.DockerImage
+	Platforms []string
+}
+
+func parseRuntimeImageLock(content []byte) (*managedRuntimeImage, error) {
 	var lock runtimeImageLock
 	if err := json.Unmarshal(content, &lock); err != nil {
 		return nil, fmt.Errorf("parse runtime image lock: %w", err)
@@ -70,10 +82,27 @@ func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
 	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
 		return nil, fmt.Errorf("runtime image digest must be a sha256 digest")
 	}
-	return &resources.DockerImage{
-		Name:   lock.Name,
-		Tag:    lock.Tag,
-		Digest: lock.Digest,
+	if len(lock.Platforms) == 0 {
+		return nil, fmt.Errorf("runtime image platforms are required")
+	}
+	seen := map[string]bool{}
+	for _, platform := range lock.Platforms {
+		os, architecture, ok := strings.Cut(platform, "/")
+		if !ok || os == "" || architecture == "" {
+			return nil, fmt.Errorf("runtime image platform %q must be in os/arch form", platform)
+		}
+		if seen[platform] {
+			return nil, fmt.Errorf("runtime image platform %q is duplicated", platform)
+		}
+		seen[platform] = true
+	}
+	return &managedRuntimeImage{
+		DockerImage: &resources.DockerImage{
+			Name:   lock.Name,
+			Tag:    lock.Tag,
+			Digest: lock.Digest,
+		},
+		Platforms: lock.Platforms,
 	}, nil
 }
 
