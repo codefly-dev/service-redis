@@ -16,12 +16,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// redisDockerRuntime retains the exact environment acquired during Init.
+// A failed shutdown must leave this handle available for retry.
+type redisDockerRuntime interface {
+	Init(context.Context) error
+	Shutdown(context.Context) error
+}
+
 type Runtime struct {
 	*services.DefaultRuntime
 	*Service
 
 	// internal
-	runnerEnvironment *dockerrun.DockerEnvironment
+	runnerEnvironment redisDockerRuntime
+	dockerDestroyMu   sync.Mutex
 
 	// nixRuntime is set instead of runnerEnvironment when the caller requests
 	// RuntimeContextNix — redis runs natively from a nix-provisioned binary.
@@ -68,6 +76,15 @@ func (s *Runtime) releaseNativeRuntime(ctx context.Context) error {
 	}
 	s.setNativeRuntime(nil)
 	return nil
+}
+
+// initializeDockerRuntime serializes acquisition and initialization with
+// destruction. Retain even a failed initialization's handle for explicit retry.
+func (s *Runtime) initializeDockerRuntime(ctx context.Context, runner redisDockerRuntime) error {
+	s.dockerDestroyMu.Lock()
+	defer s.dockerDestroyMu.Unlock()
+	s.runnerEnvironment = runner
+	return runner.Init(ctx)
 }
 
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
@@ -205,9 +222,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			)
 			runner.WithCommand(redisDockerCommand()...)
 		}
-		s.runnerEnvironment = runner
 		w.Debug("init for runner environment: will start container")
-		if errDocker = s.runnerEnvironment.Init(ctx); errDocker != nil {
+		if errDocker = s.initializeDockerRuntime(ctx, runner); errDocker != nil {
 			return s.Runtime.InitError(errDocker)
 		}
 	}
@@ -398,20 +414,16 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 		}
 		return s.Runtime.DestroyResponse()
 	}
-	// A native invocation has no container to remove, and reaching for one would
-	// demand a docker daemon from a host that was very likely chosen for not
-	// having one.
-	if s.Runtime.IsNixRuntime() {
+	// Destroy owns only the container generation acquired by this invocation's
+	// Init, including partially initialized handles. A fresh environment has no
+	// acquired ID, so Shutdown would silently do nothing; resolving the name
+	// again could instead destroy a successor owned by a different invocation.
+	s.dockerDestroyMu.Lock()
+	defer s.dockerDestroyMu.Unlock()
+	if s.runnerEnvironment == nil {
 		return s.Runtime.DestroyResponse()
 	}
-
-	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
-	if err != nil {
-		return s.Runtime.DestroyError(err)
-	}
-
-	err = runner.Shutdown(ctx)
-	if err != nil {
+	if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
 		return s.Runtime.DestroyError(err)
 	}
 	return s.Runtime.DestroyResponse()
