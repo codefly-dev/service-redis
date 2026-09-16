@@ -12,6 +12,7 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/runners/dockerrun"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -115,6 +116,18 @@ func TestRedisRuntimeMappingsRejectMalformedAliases(t *testing.T) {
 // write endpoint the agent's own readiness check happens to probe.
 func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	requireDocker(t)
+	// The source-test runner is a grandchild of the CLI's agent. Its inherited
+	// recovery marker belongs to that launcher, not this fixture. Establish
+	// ownership for our isolated resources using Core's normal scope API.
+	recoveryRoot := t.TempDir()
+	recoveryScope, err := dockerrun.NewContainerRecoveryScope(recoveryRoot, recoveryRoot, t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	if err := dockerrun.SetContainerRecoveryScope(recoveryScope); err != nil {
+		t.Fatal(err)
+	}
 	ports := make([]uint16, 2)
 	listeners := make([]net.Listener, 0, 2)
 	for i := range ports {
