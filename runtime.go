@@ -16,12 +16,19 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// redisDockerRuntime retains the exact environment acquired during Init.
+// A failed shutdown must leave this handle available for retry.
+type redisDockerRuntime interface {
+	Init(context.Context) error
+	Shutdown(context.Context) error
+}
+
 type Runtime struct {
 	*services.DefaultRuntime
 	*Service
 
 	// internal
-	runnerEnvironment *dockerrun.DockerEnvironment
+	runnerEnvironment redisDockerRuntime
 	dockerDestroyMu   sync.Mutex
 
 	// nixRuntime is set instead of runnerEnvironment when the caller requests

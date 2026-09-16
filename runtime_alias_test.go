@@ -190,7 +190,7 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	if err != nil || response.GetStatus().GetState() != runtimev0.InitStatus_READY {
 		t.Fatalf("Init: %v, %v", response, err)
 	}
-	ownedID, err = rt.runnerEnvironment.ContainerID()
+	ownedID, err = rt.runnerEnvironment.(*dockerrun.DockerEnvironment).ContainerID()
 	if err != nil || ownedID == "" {
 		t.Fatalf("acquired container identity: %q, %v", ownedID, err)
 	}
