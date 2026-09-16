@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,12 +157,30 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	rt.TcpEndpoint = write.Endpoint
 	rt.Password = "local-alias-test-password"
 	rt.RequirePass = true
+	var ownedID string
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
 		defer stop()
 		response, err := rt.Destroy(cleanup, &runtimev0.DestroyRequest{})
 		if err != nil || response.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
 			t.Errorf("destroy owned redis: %v, %v", response, err)
+		}
+		// Repeated explicit cleanup must remain safe after the acquired ID is gone.
+		repeated, repeatErr := rt.Destroy(cleanup, &runtimev0.DestroyRequest{})
+		if repeatErr != nil || repeated.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+			t.Errorf("repeat Destroy: %v, %v", repeated, repeatErr)
+		}
+		if ownedID != "" {
+			remaining, inspectErr := exec.CommandContext(cleanup, "docker", "ps", "-aq", "--filter", "id="+ownedID).Output()
+			if inspectErr != nil {
+				t.Errorf("inspect owned fixture after Destroy: %v", inspectErr)
+			} else if strings.TrimSpace(string(remaining)) != "" {
+				t.Errorf("Destroy reported success but retained owned container %s", ownedID)
+				// Bound cleanup of a failing regression to this fixture's exact ID.
+				if err := exec.CommandContext(cleanup, "docker", "rm", "--force", ownedID).Run(); err != nil {
+					t.Errorf("remove failed fixture %s: %v", ownedID, err)
+				}
+			}
 		}
 	})
 	response, err := rt.Init(ctx, &runtimev0.InitRequest{
@@ -169,6 +189,10 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	})
 	if err != nil || response.GetStatus().GetState() != runtimev0.InitStatus_READY {
 		t.Fatalf("Init: %v, %v", response, err)
+	}
+	ownedID, err = rt.runnerEnvironment.ContainerID()
+	if err != nil || ownedID == "" {
+		t.Fatalf("acquired container identity: %q, %v", ownedID, err)
 	}
 	started, err := rt.Start(ctx, &runtimev0.StartRequest{})
 	if err != nil || started.GetStatus().GetState() != runtimev0.StartStatus_STARTED {
@@ -212,5 +236,13 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	}
 	if read.Instances[0].GetPort() != uint32(ports[0]) {
 		t.Fatal("Init changed the caller's proposal")
+	}
+	stopped, err := rt.Stop(ctx, &runtimev0.StopRequest{})
+	if err != nil || stopped.GetStatus().GetState() != runtimev0.StopStatus_SUCCESS {
+		t.Fatalf("Stop: %v, %v", stopped, err)
+	}
+	retained, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", ownedID).Output()
+	if err != nil || strings.TrimSpace(string(retained)) != ownedID {
+		t.Fatalf("ordinary Stop did not preserve its container: %q, %v", retained, err)
 	}
 }

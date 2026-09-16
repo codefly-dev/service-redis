@@ -22,6 +22,7 @@ type Runtime struct {
 
 	// internal
 	runnerEnvironment *dockerrun.DockerEnvironment
+	dockerDestroyMu   sync.Mutex
 
 	// nixRuntime is set instead of runnerEnvironment when the caller requests
 	// RuntimeContextNix — redis runs natively from a nix-provisioned binary.
@@ -405,13 +406,16 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 		return s.Runtime.DestroyResponse()
 	}
 
-	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
-	if err != nil {
-		return s.Runtime.DestroyError(err)
+	// Destroy owns only the container generation acquired by this invocation's
+	// Init, including partially initialized handles. A fresh environment has no
+	// acquired ID, so Shutdown would silently do nothing; resolving the name
+	// again could instead destroy a successor owned by a different invocation.
+	s.dockerDestroyMu.Lock()
+	defer s.dockerDestroyMu.Unlock()
+	if s.runnerEnvironment == nil {
+		return s.Runtime.DestroyResponse()
 	}
-
-	err = runner.Shutdown(ctx)
-	if err != nil {
+	if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
 		return s.Runtime.DestroyError(err)
 	}
 	return s.Runtime.DestroyResponse()
