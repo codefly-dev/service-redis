@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -12,6 +13,7 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
+	"google.golang.org/protobuf/proto"
 )
 
 type Runtime struct {
@@ -95,7 +97,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	w := s.Wool.In("runtime::init")
 
-	s.NetworkMappings = req.ProposedNetworkMappings
+	// This local runtime serves one Redis instance. All declared TCP aliases
+	// must report that instance's actual addresses, rather than the separate
+	// ports the orchestrator proposed before it knew the serving endpoint.
+	mappings, err := redisRuntimeMappings(ctx, req.ProposedNetworkMappings, s.TcpEndpoint)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	s.NetworkMappings = mappings
 
 	configuration := req.GetConfiguration()
 
@@ -205,6 +214,49 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Wool.Debug("init successful")
 	return s.Runtime.InitResponse()
+}
+
+func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping, serving *basev0.Endpoint) ([]*basev0.NetworkMapping, error) {
+	primary, err := resources.FindNetworkMapping(ctx, proposed, serving)
+	if err != nil {
+		return nil, err
+	}
+	if primary == nil {
+		return nil, fmt.Errorf("serving Redis network mapping is missing")
+	}
+	views := make(map[string]*basev0.NetworkInstance)
+	for _, instance := range primary.GetInstances() {
+		access := instance.GetAccess().GetKind()
+		if access == "" || views[access] != nil {
+			return nil, fmt.Errorf("serving Redis endpoint has a missing or duplicate access view")
+		}
+		views[access] = instance
+	}
+	accepted := make([]*basev0.NetworkMapping, 0, len(proposed))
+	for _, mapping := range proposed {
+		if mapping.GetEndpoint() == nil {
+			return nil, fmt.Errorf("redis network mapping is missing its endpoint")
+		}
+		copy := proto.Clone(mapping).(*basev0.NetworkMapping)
+		if mapping.GetEndpoint().GetApi() == "tcp" {
+			if mapping.Endpoint.Module != serving.Module || mapping.Endpoint.Service != serving.Service {
+				return nil, fmt.Errorf("redis TCP alias belongs to another service")
+			}
+			if len(mapping.GetInstances()) == 0 {
+				return nil, fmt.Errorf("redis TCP alias has no access views")
+			}
+			for i, instance := range mapping.GetInstances() {
+				access := instance.GetAccess().GetKind()
+				actual := views[access]
+				if access == "" || actual == nil {
+					return nil, fmt.Errorf("serving Redis endpoint has no matching access view for %s", mapping.GetEndpoint().GetName())
+				}
+				copy.Instances[i] = proto.Clone(actual).(*basev0.NetworkInstance)
+			}
+		}
+		accepted = append(accepted, copy)
+	}
+	return accepted, nil
 }
 
 func redisDockerCommand() []string {
