@@ -7,6 +7,20 @@ spec:
   selector:
     app: {{.Name}}
   ports:
-    - port: 6379
+{{- range .Deployment.Parameters.ServicePorts }}
+{{- if .Name }}
+    - name: {{ .Name }}
+      port: {{ .Port }}
+{{- else }}
+    - port: {{ .Port }}
+{{- end }}
       targetPort: 6379
+{{- end }}
+{{- if .Deployment.Parameters.Headless }}
+  # Headless: one tcp endpoint owns 6379, so nothing needs translating and the
+  # StatefulSet keeps stable per-pod DNS. Declaring a sibling tcp endpoint gives
+  # each alias its own port, which only kube-proxy can fold onto 6379 — this
+  # Service then drops clusterIP. spec.clusterIP is immutable, so that first
+  # apply fails until this Service is deleted and recreated.
   clusterIP: None
+{{- end }}

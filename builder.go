@@ -28,6 +28,15 @@ type Builder struct {
 
 type deploymentTemplateParameters struct {
 	PasswordReference *builderv0.KubernetesSecretKeyReference
+	ServicePorts      []servicePort
+	Headless          bool
+}
+
+// servicePort is one port the rendered Service publishes. Name is empty when the
+// Service has a single port, which Kubernetes allows to stay anonymous.
+type servicePort struct {
+	Name string
+	Port uint32
 }
 
 func NewBuilder() *Builder {
@@ -161,6 +170,14 @@ func (s *Builder) prepareDeployment(
 	if err != nil {
 		return nil, err
 	}
+	parameters.ServicePorts, err = s.servicePorts(ctx, req.GetNetworkMappings())
+	if err != nil {
+		return nil, err
+	}
+	// A headless Service has no kube-proxy in front of it: clients resolve it
+	// straight to pod IPs and dial the port themselves, so port cannot differ
+	// from targetPort. Aliases are exactly that fan-in, so they need a ClusterIP.
+	parameters.Headless = len(parameters.ServicePorts) == 1
 	if services.IsRestrictedOutputProfile(deployment.Profile) {
 		passwordKey := resources.ServiceSecretConfigurationKeyFromUnique(s.Unique(), "redis", "REDIS_PASSWORD")
 		passwordReference := deployment.Kubernetes.GetSecretReferences()[passwordKey]
@@ -181,6 +198,43 @@ func (s *Builder) prepareDeployment(
 		return nil, err
 	}
 	return configuration, nil
+}
+
+// servicePorts lists the ports the rendered Service publishes: one per TCP
+// endpoint this service declares. Core hands each sibling alias of an API its
+// own derived port, but redis answers all of them from a single process on
+// 6379, so every advertised port has to be published and folded back onto it.
+func (s *Builder) servicePorts(ctx context.Context, mappings []*v0.NetworkMapping) ([]servicePort, error) {
+	var ports []servicePort
+	for _, mapping := range mappings {
+		endpoint := mapping.GetEndpoint()
+		if endpoint.GetApi() != standards.TCP ||
+			endpoint.GetModule() != s.TcpEndpoint.GetModule() ||
+			endpoint.GetService() != s.TcpEndpoint.GetService() {
+			continue
+		}
+		// An external endpoint is reached through its DNS entry from outside the
+		// cluster, never through this Service, and core gives it a public
+		// instance with no container view at all. Mirror that exclusion.
+		if resources.IsExternalEndpoint(endpoint) {
+			continue
+		}
+		instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, mappings, endpoint, resources.NewContainerNetworkAccess())
+		if err != nil {
+			return nil, err
+		}
+		// Naming a port after its number keeps it a valid IANA_SVC_NAME whatever
+		// the endpoint is called: endpoint names are author-supplied and may be
+		// longer than the 15 characters Kubernetes allows, or carry characters it
+		// rejects, and nothing here renders a manifest the API server would take.
+		ports = append(ports, servicePort{Name: fmt.Sprintf("redis-%d", instance.GetPort()), Port: instance.GetPort()})
+	}
+	// A multi-port Service must name every port; a single-port one need not, and
+	// leaving it anonymous keeps single-endpoint Services rendering as they do today.
+	if len(ports) == 1 {
+		ports[0].Name = ""
+	}
+	return ports, nil
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {

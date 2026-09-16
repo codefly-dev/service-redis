@@ -13,10 +13,14 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDeploymentTemplates(t *testing.T) {
-	destination := agenttesting.AssertKustomizeTemplates(t, deploymentFS, &deploymentTemplateParameters{})
+	destination := agenttesting.AssertKustomizeTemplates(t, deploymentFS, &deploymentTemplateParameters{
+		ServicePorts: []servicePort{{Port: 6379}},
+		Headless:     true,
+	})
 
 	secret, err := os.ReadFile(filepath.Join(destination, "overlays", "test", "secret.yaml"))
 	if err != nil {
@@ -188,6 +192,218 @@ func TestRestrictedPortableRequirePassRejectsUnusablePasswordReference(t *testin
 				t.Fatalf("failed deployment returned configuration: %+v", response.GetConfiguration())
 			}
 		})
+	}
+}
+
+// A read/write topology declares two tcp endpoints, so neither owns the
+// canonical 6379 and core derives a per-endpoint port for each. The Service has
+// to publish every port a consumer is handed and fold it onto redis's 6379,
+// which a headless Service — resolved straight to pod IPs, no port translation
+// — cannot do.
+func TestDeployedAliasPortsArePublishedByTheService(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, _ := newDeploymentTestBuilder(t)
+	read := deploymentAliasMapping(builder, "read", 16001)
+	write := deploymentAliasMapping(builder, "write", 16002)
+	builder.TcpEndpoint = write.Endpoint
+	networkMappings := []*basev0.NetworkMapping{read, write}
+	destination := t.TempDir()
+
+	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(destination, networkMappings, nil, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
+	}
+
+	service := parseRenderedService(t, destination)
+	if service.Spec.ClusterIP == "None" {
+		t.Error("headless Service cannot fold alias ports onto 6379: clients dial pod IPs directly")
+	}
+	published := make(map[uint32]renderedServicePort, len(service.Spec.Ports))
+	for _, port := range service.Spec.Ports {
+		assertUsablePortName(t, port.Name)
+		published[port.Port] = port
+	}
+	for _, mapping := range networkMappings {
+		instance, err := resources.FindNetworkInstanceInNetworkMappings(
+			context.Background(), networkMappings, mapping.GetEndpoint(), resources.NewContainerNetworkAccess())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, ok := published[instance.GetPort()]
+		if !ok {
+			t.Errorf("endpoint %q is advertised on port %d, which the Service does not expose: %+v",
+				mapping.GetEndpoint().GetName(), instance.GetPort(), service.Spec.Ports)
+			continue
+		}
+		if port.TargetPort != 6379 {
+			t.Errorf("endpoint %q port %d targets %d, want redis on 6379",
+				mapping.GetEndpoint().GetName(), port.Port, port.TargetPort)
+		}
+	}
+}
+
+// A single tcp endpoint owns the canonical port, so it needs no fan-in and
+// keeps the headless Service that gives the StatefulSet stable pod DNS.
+func TestSingleEndpointDeploymentRendersUnchangedService(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	destination := t.TempDir()
+
+	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(destination, networkMappings, nil, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
+	}
+
+	service := readDeploymentFile(t, destination, "base", "service.yaml")
+	want := `apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: codefly-test
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  # Headless: one tcp endpoint owns 6379, so nothing needs translating and the
+  # StatefulSet keeps stable per-pod DNS. Declaring a sibling tcp endpoint gives
+  # each alias its own port, which only kube-proxy can fold onto 6379 — this
+  # Service then drops clusterIP. spec.clusterIP is immutable, so that first
+  # apply fails until this Service is deleted and recreated.
+  clusterIP: None
+`
+	if service != want {
+		t.Errorf("single-endpoint Service rendering changed:\ngot:\n%s\nwant:\n%s", service, want)
+	}
+}
+
+// An endpoint name is author-supplied and reaches the manifest only through a
+// Service port name, which Kubernetes validates as an IANA_SVC_NAME: at most 15
+// characters, lowercase alphanumerics and dashes, at least one letter. A name
+// the API server rejects renders and passes static validation, then fails at apply.
+func TestServicePortNamesStayValidForAnyEndpointName(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, _ := newDeploymentTestBuilder(t)
+	long := deploymentAliasMapping(builder, "analytics-read-replica", 16001)
+	underscored := deploymentAliasMapping(builder, "write_primary", 16002)
+	builder.TcpEndpoint = underscored.Endpoint
+	destination := t.TempDir()
+
+	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
+		destination, []*basev0.NetworkMapping{long, underscored}, nil, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
+	}
+
+	service := parseRenderedService(t, destination)
+	if len(service.Spec.Ports) != 2 {
+		t.Fatalf("Service ports = %+v, want one per endpoint", service.Spec.Ports)
+	}
+	for _, port := range service.Spec.Ports {
+		assertUsablePortName(t, port.Name)
+	}
+}
+
+// An external endpoint is routed through DNS from outside the cluster, so core
+// gives it a public instance and no container view. Reading it as a port this
+// Service must publish fails the whole deployment.
+func TestExternalTCPEndpointIsNotPublishedByTheService(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, _ := newDeploymentTestBuilder(t)
+	write := deploymentAliasMapping(builder, "write", 16002)
+	read := deploymentAliasMapping(builder, "read", 16001)
+	read.Endpoint.Visibility = resources.VisibilityExternal
+	external := resources.NewNetworkInstance("redis.example.com", 6379)
+	external.Access = resources.NewPublicNetworkAccess()
+	read.Instances = []*basev0.NetworkInstance{external}
+	builder.TcpEndpoint = write.Endpoint
+	destination := t.TempDir()
+
+	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
+		destination, []*basev0.NetworkMapping{read, write}, nil, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+		t.Fatalf("external alias broke the deployment: %s", response.GetState().GetMessage())
+	}
+
+	service := parseRenderedService(t, destination)
+	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Port != 16002 {
+		t.Fatalf("Service ports = %+v, want only the cluster-internal endpoint", service.Spec.Ports)
+	}
+	if service.Spec.ClusterIP != "None" {
+		t.Error("a lone cluster-internal endpoint needs no translation and stays headless")
+	}
+}
+
+func assertUsablePortName(t *testing.T, name string) {
+	t.Helper()
+	if name == "" {
+		t.Error("multi-port Service requires every port to be named")
+		return
+	}
+	if len(name) > 15 {
+		t.Errorf("port name %q is %d characters, Kubernetes allows at most 15", name, len(name))
+	}
+	letters := 0
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			letters++
+		case (r >= '0' && r <= '9') || r == '-':
+		default:
+			t.Errorf("port name %q contains %q, which Kubernetes rejects", name, r)
+		}
+	}
+	if letters == 0 {
+		t.Errorf("port name %q has no letter, which Kubernetes requires", name)
+	}
+}
+
+type renderedServicePort struct {
+	Name       string `yaml:"name"`
+	Port       uint32 `yaml:"port"`
+	TargetPort uint32 `yaml:"targetPort"`
+}
+
+type renderedService struct {
+	Spec struct {
+		ClusterIP string                `yaml:"clusterIP"`
+		Ports     []renderedServicePort `yaml:"ports"`
+	} `yaml:"spec"`
+}
+
+func parseRenderedService(t *testing.T, destination string) renderedService {
+	t.Helper()
+	var service renderedService
+	if err := yaml.Unmarshal([]byte(readDeploymentFile(t, destination, "base", "service.yaml")), &service); err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func deploymentAliasMapping(builder *Builder, name string, port uint16) *basev0.NetworkMapping {
+	instance := resources.NewNetworkInstance("redis.codefly-test.svc.cluster.local", port)
+	instance.Access = resources.NewContainerNetworkAccess()
+	return &basev0.NetworkMapping{
+		Endpoint: &basev0.Endpoint{
+			Name:    name,
+			Module:  builder.Identity.Module,
+			Service: builder.Identity.Name,
+			Api:     "tcp",
+		},
+		Instances: []*basev0.NetworkInstance{instance},
 	}
 }
 
