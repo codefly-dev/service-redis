@@ -7,6 +7,15 @@ spec:
   selector:
     app: {{.Name}}
   ports:
-    - port: 6379
+{{- range .Deployment.Parameters.ServicePorts }}
+{{- if .Name }}
+    - name: {{ .Name }}
+      port: {{ .Port }}
+{{- else }}
+    - port: {{ .Port }}
+{{- end }}
       targetPort: 6379
+{{- end }}
+{{- if .Deployment.Parameters.Headless }}
   clusterIP: None
+{{- end }}
