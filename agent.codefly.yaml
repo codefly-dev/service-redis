@@ -1,7 +1,7 @@
 publisher: codefly.dev
 kind: codefly:service
 name: redis
-version: 0.0.88
+version: 0.0.89
 source:
   directory: .
   agent: codefly.dev/go:0.0.51
