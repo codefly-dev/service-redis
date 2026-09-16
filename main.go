@@ -143,9 +143,9 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 // resolveServingTCPEndpoint selects the single TCP endpoint the redis agent
 // binds its runtime and deployment to. A read-replica topology declares several
-// tcp endpoints (e.g. read + write) on one shared port; they all address the
-// same redis instance, so any of them resolves the network mapping. Core's
-// FindTCPEndpoint rejects that ambiguity, so prefer the write/primary endpoint
+// tcp endpoints (e.g. read + write). The local runtime serves them on one
+// instance and returns the selected endpoint's actual addresses for each alias.
+// Core's FindTCPEndpoint rejects that ambiguity, so prefer the write/primary endpoint
 // when present and otherwise fall back to the first declared TCP endpoint.
 func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) (*basev0.Endpoint, error) {
 	tcp := resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints)
