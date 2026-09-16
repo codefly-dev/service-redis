@@ -8,7 +8,6 @@ import (
 	"github.com/codefly-dev/core/agents/communicate"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
-	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
@@ -214,11 +213,21 @@ func (s *Builder) servicePorts(ctx context.Context, mappings []*v0.NetworkMappin
 			endpoint.GetService() != s.TcpEndpoint.GetService() {
 			continue
 		}
+		// An external endpoint is reached through its DNS entry from outside the
+		// cluster, never through this Service, and core gives it a public
+		// instance with no container view at all. Mirror that exclusion.
+		if resources.IsExternalEndpoint(endpoint) {
+			continue
+		}
 		instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, mappings, endpoint, resources.NewContainerNetworkAccess())
 		if err != nil {
 			return nil, err
 		}
-		ports = append(ports, servicePort{Name: shared.ToDNSCase(endpoint.GetName()), Port: instance.GetPort()})
+		// Naming a port after its number keeps it a valid IANA_SVC_NAME whatever
+		// the endpoint is called: endpoint names are author-supplied and may be
+		// longer than the 15 characters Kubernetes allows, or carry characters it
+		// rejects, and nothing here renders a manifest the API server would take.
+		ports = append(ports, servicePort{Name: fmt.Sprintf("redis-%d", instance.GetPort()), Port: instance.GetPort()})
 	}
 	// A multi-port Service must name every port; a single-port one need not, and
 	// leaving it anonymous keeps single-endpoint Services rendering as they do today.
