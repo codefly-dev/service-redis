@@ -12,7 +12,6 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/agents/services/sbom"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 )
@@ -94,7 +93,7 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 		}
 		subjects = s.runtimeImageSubjects()
 	}
-	return s.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
+	return s.Builder.SBOMImages(ctx, subjects)
 }
 
 // runtimeImageSubjects names one subject per shipped platform. Digest stays

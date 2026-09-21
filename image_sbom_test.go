@@ -148,7 +148,7 @@ func TestNoImageClaimFailsCoverageForAShippedImage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SBOMNoImage: %v", err)
 		}
-		if err := sbom.ValidateCoverage(expected, response); err == nil {
+		if err := sbom.ValidateCoverage(builder.Unique(), expected, response); err == nil {
 			t.Fatalf("%s passed coverage for a service that ships %d images", reason, len(expected))
 		}
 	}
@@ -166,7 +166,7 @@ func TestSourceInventoryFailsImageCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SBOMResponse: %v", err)
 	}
-	if err := sbom.ValidateCoverage(expected, response); err == nil {
+	if err := sbom.ValidateCoverage(builder.Unique(), expected, response); err == nil {
 		t.Fatal("a source inventory passed image coverage")
 	}
 }
@@ -190,7 +190,7 @@ func TestEnumeratedSubjectsSatisfyCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SBOMImageResponse: %v", err)
 	}
-	if err := sbom.ValidateCoverage(expected, response); err != nil {
+	if err := sbom.ValidateCoverage(builder.Unique(), expected, response); err != nil {
 		t.Fatalf("enumerated subjects failed coverage: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestEnumeratedSubjectsSatisfyCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SBOMImageResponse: %v", err)
 	}
-	if err := sbom.ValidateCoverage(expected, partial); err == nil {
+	if err := sbom.ValidateCoverage(builder.Unique(), expected, partial); err == nil {
 		t.Fatal("evidence for one platform passed coverage for a multi-platform image")
 	}
 }
@@ -224,7 +224,7 @@ func TestImageSBOMCoversEveryShippedPlatform(t *testing.T) {
 	if response.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Fatalf("scope = %s, want image", response.GetScope())
 	}
-	if err := sbom.ValidateCoverage(expectedRuntimeSubjects(t, builder.Unique()), response); err != nil {
+	if err := sbom.ValidateCoverage(builder.Unique(), expectedRuntimeSubjects(t, builder.Unique()), response); err != nil {
 		t.Fatalf("scanned evidence failed coverage: %v", err)
 	}
 
