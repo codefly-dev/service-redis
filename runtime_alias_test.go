@@ -15,6 +15,7 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
+	"github.com/codefly-dev/core/runners/recoveryscope"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -126,7 +127,7 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	t.Setenv(recoveryscope.EnvironmentVariable, os.Getenv(recoveryscope.EnvironmentVariable))
 	if err := dockerrun.SetContainerRecoveryScope(recoveryScope); err != nil {
 		t.Fatal(err)
 	}
