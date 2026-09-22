@@ -2,6 +2,9 @@ publisher: codefly.dev
 kind: codefly:service
 name: redis
 version: 0.0.90
+release:
+  owner: workflow
+  workflow: releaser.yml
 source:
   directory: .
   agent: codefly.dev/go:0.0.51
