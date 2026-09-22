@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-redis
 go 1.27.0
 
 require (
-	github.com/codefly-dev/core v0.3.41
+	github.com/codefly-dev/core v0.4.0
 	github.com/codefly-dev/gortk v0.2.0
 	github.com/gofrs/flock v0.13.1
 	google.golang.org/grpc v1.83.2
