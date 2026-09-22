@@ -7,4 +7,4 @@ release:
   workflow: releaser.yml
 source:
   directory: .
-  agent: codefly.dev/go:0.0.51
+  agent: codefly.dev/go:0.0.54
