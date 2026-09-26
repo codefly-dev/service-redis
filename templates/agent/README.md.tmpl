@@ -30,8 +30,13 @@ to the primary is up.
   the replicas. The `cache` group always names the primary.
 - Locally (Docker or nix) a read endpoint has one address, so it reaches the
   first replica; further replicas run, replicate and are held to the same
-  readiness on ports of their own, but no local endpoint routes to them. Under
-  Docker the primary and its replicas share one container.
+  readiness on ports of their own, but no local endpoint routes to them.
+- Under Docker the primary and its replicas share one container. This is a
+  deliberate choice: core's docker runner has no container-to-container
+  network, so a replica in a container of its own could not reach the primary.
+  One container is also the failure domain the nix runtime has (one host, one
+  process set). A replica that dies inside it is not reported; the primary's
+  exit is.
 - In Kubernetes the primary and the replicas are two StatefulSets behind the
   one Service: the write port reaches only the primary, the read port balances
   across every replica. Replicas keep their data in an `emptyDir` and resync

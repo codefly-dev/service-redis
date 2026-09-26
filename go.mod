@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/codefly-dev/core v0.5.1
 	github.com/codefly-dev/gortk v0.2.0
-	github.com/codefly-dev/interface-cache/go/cache v0.1.0
+	github.com/codefly-dev/interface-cache/go/cache v0.2.0
 	github.com/codefly-dev/service-redis/cache v0.0.0
 	github.com/gofrs/flock v0.13.1
 	github.com/redis/go-redis/v9 v9.22.0
@@ -117,8 +117,3 @@ require (
 )
 
 replace github.com/codefly-dev/service-redis/cache => ./cache
-
-// TEMPORARY: go/cache 0.2.0 (identity partitions) from the head of
-// codefly-dev/interface-cache#6, which is not merged or tagged. Replace with a
-// require of github.com/codefly-dev/interface-cache/go/cache v0.2.0 once tagged.
-replace github.com/codefly-dev/interface-cache/go/cache => github.com/codefly-dev/interface-cache/go/cache v0.1.1-0.20260926150409-cb0b85287daf

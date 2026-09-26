@@ -98,7 +98,7 @@ broken image stops build, vet and test from reporting at all.
 | `redisprobe.go` | the readiness handshake (RESP `AUTH` + `PING`, a replica's link), shared by both runtimes |
 | `redislog.go` | parses redis' own log prefix into `wool` records at a mapped severity |
 | `builder.go` | Builder contract: `Create`, `Deploy` (kustomize), `Audit`, `SBOM`, `Upgrade` |
-| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import (leases, invalidation notices) |
+| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import (leases; notices on RESP3 client tracking, `cache/tracking.go`) |
 | `cacheprovider_test.go` | the emitted `cache` group, and `cachetest` conformance through the Runtime |
 | `runtimeredis_test.go` | `startRuntimeRedis`: HeadlessLoad → Init → Start → Destroy, docker or nix, replicas |
 | `Dockerfile`, `runtime-image.json` | the shipped runtime image and the lock that pins it |
@@ -118,7 +118,10 @@ broken image stops build, vet and test from reporting at all.
   it, the serving (write) endpoint is the primary and every other alias the
   replicas (`replicaof`, ready only at `master_link_status:up`); `Deploy` renders
   both StatefulSets and routes each port by named target port. The cache group
-  always names the primary.
+  always names the primary. Under docker the replicas share the primary's
+  container: deliberate and owner-accepted, because core's docker runner has no
+  container-to-container network. Changing that is a core capability, not a
+  workaround to build here.
 - **`runtime-image.json` is a lock, not documentation.** Publish the image before
   you pin its digest: the reproducibility check passes on a pin that was never
   pushed, and only the anonymous-pull check catches it. See the

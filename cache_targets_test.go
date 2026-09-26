@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,9 +145,21 @@ func TestRealRedisCacheOverCluster(t *testing.T) {
 	// Every key the driver writes for one cache key must share a slot, or its
 	// two-key scripts fail with CROSSSLOT; spread across nodes, the suite
 	// below would hit that on the first Set.
-	runCacheSuite(t, cachetest.Harness{New: func(t *testing.T, namespace string) cacheiface.Layer {
+	// Tracking is per server, so the layer tracks every primary, and an
+	// interruption kills its tracking connection on each of them.
+	runCacheSuite(t, redisHarness(func(t *testing.T, namespace string) *rediscache.Layer {
 		return rediscache.New(newClient(t), rediscache.WithPrefix(namespace))
-	}})
+	}, client, func(t *testing.T) []*goredis.Client {
+		var primaries []*goredis.Client
+		var mu sync.Mutex
+		mustCache(t, client.ForEachMaster(ctx, func(_ context.Context, node *goredis.Client) error {
+			mu.Lock()
+			defer mu.Unlock()
+			primaries = append(primaries, node)
+			return nil
+		}))
+		return primaries
+	}))
 
 	// And the keys do spread: a cluster holding everything on one node would
 	// pass the suite without proving anything about slots.

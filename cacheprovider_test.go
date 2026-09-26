@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	cacheiface "github.com/codefly-dev/interface-cache/go/cache"
 	"github.com/codefly-dev/interface-cache/go/cache/cachetest"
 	rediscache "github.com/codefly-dev/service-redis/cache"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // emitted reads a configuration the agent produced, the way the SDK reads what
@@ -135,10 +137,69 @@ func testRuntimeCache(t *testing.T, backend redisBackend, replicas int) {
 
 // connectionHarness gives each namespace its own client on connection, as
 // separate processes would have.
-func connectionHarness(connection string, opts ...rediscache.Option) cachetest.Harness {
-	return cachetest.Harness{New: func(t *testing.T, namespace string) cacheiface.Layer {
-		return rediscache.New(redisClient(t, connection), append([]rediscache.Option{rediscache.WithPrefix(namespace)}, opts...)...)
-	}}
+func connectionHarness(t *testing.T, connection string) cachetest.Harness {
+	server := redisClient(t, connection)
+	return redisHarness(func(t *testing.T, namespace string) *rediscache.Layer {
+		return rediscache.New(redisClient(t, connection), rediscache.WithPrefix(namespace))
+	}, server, func(*testing.T) []*goredis.Client { return []*goredis.Client{server} })
+}
+
+// redisHarness completes a harness with the hooks the Notifier and Resyncer
+// cases need. writer is where a write that bypasses the driver lands (the
+// primary, or the cluster); tracking lists the servers the layers' tracking
+// connections live on (the server they read).
+func redisHarness(
+	newLayer func(t *testing.T, namespace string) *rediscache.Layer,
+	writer goredis.Cmdable,
+	tracking func(t *testing.T) []*goredis.Client,
+) cachetest.Harness {
+	return cachetest.Harness{
+		New: func(t *testing.T, namespace string) cacheiface.Layer { return newLayer(t, namespace) },
+		// A plain SET of the driver's value key, as another program would.
+		ExternalWrite: func(t *testing.T, namespace, key string) {
+			if err := writer.Set(context.Background(), namespace+":v:{"+key+"}", "written externally", time.Minute).Err(); err != nil {
+				t.Fatal(err)
+			}
+		},
+		// The server drops this layer's tracking connections, as a network
+		// failure or a restart would.
+		Interrupt: func(t *testing.T, l cacheiface.Layer) {
+			name := l.(*rediscache.Layer).TrackingClientName()
+			if killed := killTrackingConnections(t, tracking(t), name); killed == 0 {
+				t.Fatalf("no tracking connection %q to interrupt", name)
+			}
+		},
+	}
+}
+
+// killTrackingConnections CLIENT KILLs every connection named name on servers
+// and returns how many there were.
+func killTrackingConnections(t *testing.T, servers []*goredis.Client, name string) int {
+	t.Helper()
+	ctx := context.Background()
+	killed := 0
+	for _, server := range servers {
+		list, err := server.ClientList(ctx).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(list, "\n") {
+			fields := map[string]string{}
+			for _, field := range strings.Fields(line) {
+				if k, v, ok := strings.Cut(field, "="); ok {
+					fields[k] = v
+				}
+			}
+			if fields["name"] != name {
+				continue
+			}
+			if err := server.ClientKillByFilter(ctx, "ID", fields["id"]).Err(); err != nil {
+				t.Fatal(err)
+			}
+			killed++
+		}
+	}
+	return killed
 }
 
 // runCacheSuite is the interface's conformance, plus what a stack over the
@@ -199,7 +260,7 @@ func runCacheInterface(t *testing.T, conf emitted, password string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runCacheSuite(t, connectionHarness(connection))
+	runCacheSuite(t, connectionHarness(t, connection))
 
 	t.Run("OpenThroughTheInterface", func(t *testing.T) {
 		ctx := context.Background()

@@ -118,6 +118,17 @@ func runReplicaCache(t *testing.T, r *runtimeRedis) {
 		}
 	})
 
+	// The whole suite for a client reading through the first replica, with
+	// every write on the primary: change notices, a write that bypasses the
+	// driver and resyncs are all tracked on the replica.
+	t.Run("ConformanceThroughAReplica", func(t *testing.T) {
+		primary, replica := redisClient(t, primaryConnection), redisClient(t, replicaConnections[0])
+		runCacheSuite(t, redisHarness(func(t *testing.T, namespace string) *rediscache.Layer {
+			return rediscache.New(redisClient(t, primaryConnection), rediscache.WithPrefix(namespace),
+				rediscache.WithReplica(redisClient(t, replicaConnections[0])))
+		}, primary, func(*testing.T) []*goredis.Client { return []*goredis.Client{replica} }))
+	})
+
 	t.Run("ReplicationLag", func(t *testing.T) {
 		measureReplicationLag(t, primaryConnection, replicaConnections[0])
 	})
