@@ -22,6 +22,9 @@ import (
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/templates"
+
+	cacheiface "github.com/codefly-dev/interface-cache/go/cache"
+	rediscache "github.com/codefly-dev/service-redis/cache"
 )
 
 // Agent version
@@ -137,6 +140,13 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 					{Name: "connection", Description: "connection string"},
 				},
 			},
+			{
+				Name: cacheiface.Group, Description: "codefly.dev/cache provider: open with cache.Open and the driver github.com/codefly-dev/service-redis/cache",
+				Fields: []*agentv0.ConfigurationValueInformation{
+					{Name: cacheiface.KeyDriver, Description: "driver name, always " + rediscache.DriverName},
+					{Name: cacheiface.KeyConnection, Description: "connection string"},
+				},
+			},
 		},
 	}.Build(), nil
 }
@@ -219,6 +229,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 					{Key: "connection", Value: connection, Secret: true},
 				},
 			},
+			cacheConfiguration(connection),
 		},
 	}
 	return outputConf, nil
@@ -235,6 +246,22 @@ func (s *Service) restrictedConnectionConfiguration(instance *basev0.NetworkInst
 					{Key: "connection", Secret: true},
 				},
 			},
+			cacheConfiguration(""),
+		},
+	}
+}
+
+// cacheConfiguration is what makes service-redis a provider of
+// codefly.dev/cache: the group the interface definition fixes, naming the
+// driver this repository ships (./cache) and the same connection as the redis
+// group. An empty connection is the value-free secret reference restricted
+// deployments return.
+func cacheConfiguration(connection string) *basev0.ConfigurationInformation {
+	return &basev0.ConfigurationInformation{
+		Name: cacheiface.Group,
+		ConfigurationValues: []*basev0.ConfigurationValue{
+			{Key: cacheiface.KeyDriver, Value: rediscache.DriverName},
+			{Key: cacheiface.KeyConnection, Value: connection, Secret: true},
 		},
 	}
 }
