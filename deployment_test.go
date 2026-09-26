@@ -14,6 +14,9 @@ import (
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
 	"gopkg.in/yaml.v3"
+
+	cacheiface "github.com/codefly-dev/interface-cache/go/cache"
+	rediscache "github.com/codefly-dev/service-redis/cache"
 )
 
 func TestDeploymentTemplates(t *testing.T) {
@@ -88,8 +91,8 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 		t.Fatal("connection configuration has no runtime context")
 	}
 	infos := configuration.GetInfos()
-	if len(infos) != 1 || infos[0].GetName() != "redis" {
-		t.Fatalf("connection configuration infos = %v", infos)
+	if len(infos) != 2 || infos[0].GetName() != "redis" || infos[1].GetName() != cacheiface.Group {
+		t.Fatalf("connection configuration infos = %v, want the redis and cache groups", infos)
 	}
 	values := infos[0].GetConfigurationValues()
 	if len(values) != 1 || values[0].GetKey() != "connection" {
@@ -97,6 +100,18 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 	}
 	if !values[0].GetSecret() || values[0].GetValue() != "" {
 		t.Fatalf("connection descriptor = %+v, want a value-free secret reference", values[0])
+	}
+	// The cache group names its driver in the clear and carries the same
+	// value-free connection reference.
+	cacheValues := map[string]*basev0.ConfigurationValue{}
+	for _, v := range infos[1].GetConfigurationValues() {
+		cacheValues[v.GetKey()] = v
+	}
+	if d := cacheValues[cacheiface.KeyDriver]; len(cacheValues) != 2 || d == nil || d.GetValue() != rediscache.DriverName || d.GetSecret() {
+		t.Fatalf("cache group = %v, want driver %q in the clear", infos[1].GetConfigurationValues(), rediscache.DriverName)
+	}
+	if c := cacheValues[cacheiface.KeyConnection]; c == nil || !c.GetSecret() || c.GetValue() != "" {
+		t.Fatalf("cache connection = %+v, want a value-free secret reference", c)
 	}
 
 	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")

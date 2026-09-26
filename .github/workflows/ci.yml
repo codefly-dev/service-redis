@@ -48,6 +48,28 @@ jobs:
           REDIS_INFRA_TESTS: required
         run: go test -run TestRealRedis -count=1 -v -timeout 30m ./...
 
+  # The codefly.dev/cache driver is its own module, so consumers import it
+  # without the agent. The shared workflow checks only the root module; its
+  # tests live in the root module, where they run against both runtimes.
+  cache-module:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: cache/go.mod
+          cache: false
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go mod tidy -diff
+
   image:
     permissions:
       contents: read

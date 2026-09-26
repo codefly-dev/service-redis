@@ -98,6 +98,8 @@ broken image stops build, vet and test from reporting at all.
 | `redisprobe.go` | the readiness handshake (RESP `AUTH` + `PING`), shared by both runtimes |
 | `redislog.go` | parses redis' own log prefix into `wool` records at a mapped severity |
 | `builder.go` | Builder contract: `Create`, `Deploy` (kustomize), `Audit`, `SBOM`, `Upgrade` |
+| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import (leases, invalidation notices) |
+| `cacheprovider_test.go` | the emitted `cache` group, and `cachetest` conformance over both runtimes |
 | `Dockerfile`, `runtime-image.json` | the shipped runtime image and the lock that pins it |
 | `nix/flake.nix` | redis for the native runtime — the other half of runtime parity |
 | `templates/deployment` | kustomize base + environment overlay rendered by `Deploy` |
@@ -121,6 +123,11 @@ broken image stops build, vet and test from reporting at all.
 - **The platform list in the lock is load-bearing.** CI builds exactly those
   platforms, so the digest comparison is what proves the published index ships
   them, and image SBOM evidence owes one subject per platform.
+- **This agent provides `codefly.dev/cache`** (codefly-dev/interface-cache):
+  the `cache` group (`driver: redis`, the `redis` group's `connection`) and the
+  `cache/` driver. Only `TestRealRedisCache*`, the interface's conformance suite
+  over docker and nix, proves them; a driver change that has not run it is
+  unverified.
 - **Keep both runtimes at parity.** Moving the image without moving
   `nix/flake.lock` leaves the native runtime on a different redis.
 - **Do not mock the server.** The socket fixtures in `redisprobe_test.go` pin the
