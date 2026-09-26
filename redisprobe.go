@@ -7,6 +7,10 @@ package main
 // answers an unauthenticated PING with "-NOAUTH …", a starting one with
 // "-LOADING …", and an unrelated service with whatever it speaks; none of those
 // prove the agent can run commands, so none of them count as ready.
+//
+// A read replica is held to more: it answers PING as soon as it starts, long
+// before it has the primary's data, so it is ready only once it also reports
+// its link to the primary up (INFO replication, master_link_status:up).
 
 import (
 	"bufio"
@@ -14,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +42,10 @@ const (
 	// before redis inside it serves, and a cold container start is slower than a
 	// local process launch.
 	redisDockerReadinessBudget = 60 * time.Second
+
+	// redisProbeMaxBulkBytes bounds the one bulk reply the probe reads, INFO
+	// replication, which is a few hundred bytes from a real server.
+	redisProbeMaxBulkBytes = 64 << 10
 )
 
 // errRedisProtocol marks a reply that is not RESP at all. Unlike a refused dial
@@ -62,6 +72,9 @@ type redisWaitOptions struct {
 	address  string
 	password string
 	budget   time.Duration
+	// replica requires the server to be a replica whose link to its primary
+	// is up, on top of the authenticated PING.
+	replica bool
 
 	// onAttemptFailed, when set, receives every failed probe. Without it a wait
 	// is silent for its whole budget, which is the failure users actually watch.
@@ -77,7 +90,11 @@ func waitForRedisPong(ctx context.Context, opts redisWaitOptions) error {
 
 	var last error
 	for {
-		err := probeRedis(ctx, opts.address, opts.password)
+		probe := probeRedis
+		if opts.replica {
+			probe = probeRedisReplica
+		}
+		err := probe(ctx, opts.address, opts.password)
 		if err == nil {
 			return nil
 		}
@@ -104,6 +121,31 @@ func waitForRedisPong(ctx context.Context, opts redisWaitOptions) error {
 // probeRedis runs one handshake: authenticate when a password is configured,
 // then require a parsed "+PONG".
 func probeRedis(ctx context.Context, address string, password string) error {
+	return withRedisHandshake(ctx, address, password, nil)
+}
+
+// probeRedisReplica runs the handshake, then requires the server to be a
+// replica with its link to the primary up. A replica still syncing is
+// retryable; a server that is not a replica at all is not.
+func probeRedisReplica(ctx context.Context, address string, password string) error {
+	return withRedisHandshake(ctx, address, password, func(conn net.Conn, reader *bufio.Reader) error {
+		info, err := redisInfo(ctx, conn, reader, address, "replication")
+		if err != nil {
+			return err
+		}
+		if role := info["role"]; role != "slave" {
+			return &redisProbeError{phase: "replication", address: address, err: fmt.Errorf("server role is %q, want a replica", role)}
+		}
+		if link := info["master_link_status"]; link != "up" {
+			return &redisProbeError{phase: "replication", address: address, retryable: true, err: fmt.Errorf("link to the primary is %q", link)}
+		}
+		return nil
+	})
+}
+
+// withRedisHandshake authenticates and PINGs, then runs then on the same
+// connection when it is set.
+func withRedisHandshake(ctx context.Context, address string, password string, then func(net.Conn, *bufio.Reader) error) error {
 	dialer := &net.Dialer{Timeout: redisProbeDialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -130,7 +172,67 @@ func probeRedis(ctx context.Context, address string, password string) error {
 			return err
 		}
 	}
-	return redisExchange(ctx, conn, reader, "ping", address, "PONG", "PING")
+	if err = redisExchange(ctx, conn, reader, "ping", address, "PONG", "PING"); err != nil || then == nil {
+		return err
+	}
+	return then(conn, reader)
+}
+
+// redisInfo reads one INFO section as its field:value pairs.
+func redisInfo(ctx context.Context, conn net.Conn, reader *bufio.Reader, address string, section string) (map[string]string, error) {
+	if err := writeRedisCommand(ctx, conn, "INFO", section); err != nil {
+		return nil, &redisProbeError{phase: "info", address: address, retryable: true, err: err}
+	}
+	body, err := readRedisBulk(ctx, conn, reader)
+	var refused *redisReplyError
+	if errors.As(err, &refused) {
+		return nil, &redisProbeError{phase: "info", address: address, retryable: isRetryableRedisError(refused.message), err: err}
+	}
+	if err != nil {
+		return nil, &redisProbeError{phase: "info", address: address, retryable: !errors.Is(err, errRedisProtocol), err: err}
+	}
+	info := map[string]string{}
+	for _, line := range strings.Split(body, "\r\n") {
+		if key, value, ok := strings.Cut(line, ":"); ok && !strings.HasPrefix(line, "#") {
+			info[key] = value
+		}
+	}
+	return info, nil
+}
+
+// redisReplyError is an error frame: the server refusing the command.
+type redisReplyError struct{ message string }
+
+func (e *redisReplyError) Error() string { return fmt.Sprintf("server replied %q", e.message) }
+
+// readRedisBulk reads one bulk-string reply. An error frame is reported as the
+// server's refusal, anything else as a peer that is not the redis we started.
+func readRedisBulk(ctx context.Context, conn net.Conn, reader *bufio.Reader) (string, error) {
+	if err := conn.SetReadDeadline(redisIODeadline(ctx)); err != nil {
+		return "", err
+	}
+	header, err := readRedisLine(reader)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(header, "-") {
+		return "", &redisReplyError{message: header[1:]}
+	}
+	if !strings.HasPrefix(header, "$") {
+		return "", fmt.Errorf("%w: unexpected frame %q, want a bulk string", errRedisProtocol, header)
+	}
+	size, err := strconv.Atoi(header[1:])
+	if err != nil || size < 0 || size > redisProbeMaxBulkBytes {
+		return "", fmt.Errorf("%w: bulk length %q", errRedisProtocol, header[1:])
+	}
+	body := make([]byte, size+2)
+	if _, err = io.ReadFull(reader, body); err != nil {
+		return "", err
+	}
+	if string(body[size:]) != "\r\n" {
+		return "", fmt.Errorf("%w: bulk string not CRLF terminated", errRedisProtocol)
+	}
+	return string(body[:size]), nil
 }
 
 func redisExchange(ctx context.Context, conn net.Conn, reader *bufio.Reader, phase string, address string, want string, args ...string) error {

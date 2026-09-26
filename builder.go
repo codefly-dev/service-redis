@@ -29,13 +29,28 @@ type deploymentTemplateParameters struct {
 	PasswordReference *builderv0.KubernetesSecretKeyReference
 	ServicePorts      []servicePort
 	Headless          bool
+	// Replicas is the number of read replicas rendered beside the primary, 0
+	// for none. ReplicaOf is the address they replicate: the primary's own
+	// endpoint, as core resolves it for a consumer inside the cluster.
+	Replicas  int
+	ReplicaOf *replicaSource
+}
+
+type replicaSource struct {
+	Host string
+	Port uint32
 }
 
 // servicePort is one port the rendered Service publishes. Name is empty when the
-// Service has a single port, which Kubernetes allows to stay anonymous.
+// Service has a single port, which Kubernetes allows to stay anonymous. Target
+// is the container port it reaches: 6379 when one process serves every alias,
+// or the named port only the primary's pods ("primary") or only the replicas'
+// pods ("replica") declare, which is how one Service routes each alias to its
+// own processes.
 type servicePort struct {
-	Name string
-	Port uint32
+	Name   string
+	Port   uint32
+	Target string
 }
 
 func NewBuilder() *Builder {
@@ -54,12 +69,10 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		Requirements:     requirements,
 		FactoryTemplates: factoryFS,
 		ResolveEndpoints: func(ctx context.Context, endpoints []*v0.Endpoint) error {
-			endpoint, err := resolveServingTCPEndpoint(ctx, endpoints)
-			if err != nil {
+			if err := s.resolveTCPEndpoints(ctx, endpoints); err != nil {
 				return err
 			}
-			s.TcpEndpoint = endpoint
-			s.Wool.Debug("endpoint", wool.Field("tcp", endpoint))
+			s.Wool.Debug("endpoint", wool.Field("tcp", s.TcpEndpoint), wool.NullableField("read", s.ReadEndpoint))
 			return nil
 		},
 	})
@@ -169,7 +182,24 @@ func (s *Builder) prepareDeployment(
 	if err != nil {
 		return nil, err
 	}
-	parameters.ServicePorts, err = s.servicePorts(ctx, req.GetNetworkMappings())
+	parameters.Replicas, err = s.replicaCount()
+	if err != nil {
+		return nil, err
+	}
+	var readInstance *v0.NetworkInstance
+	if parameters.Replicas > 0 {
+		if s.ReadEndpoint == nil {
+			return nil, fmt.Errorf("with-read-replicas is set but no endpoint was resolved for the replicas")
+		}
+		readInstance, err = resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.ReadEndpoint, resources.NewContainerNetworkAccess())
+		if err != nil {
+			return nil, err
+		}
+		// Replicas reach the primary the way any consumer inside the cluster
+		// does: through its endpoint, whose Service port targets the primary.
+		parameters.ReplicaOf = &replicaSource{Host: instance.GetHostname(), Port: instance.GetPort()}
+	}
+	parameters.ServicePorts, err = s.servicePorts(ctx, req.GetNetworkMappings(), parameters.Replicas > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +220,7 @@ func (s *Builder) prepareDeployment(
 			}
 			parameters.PasswordReference = passwordReference
 		}
-		return s.restrictedConnectionConfiguration(instance), nil
+		return s.restrictedConnectionConfiguration(instance, parameters.Replicas > 0), nil
 	}
 	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance)
 	if err != nil {
@@ -199,22 +229,30 @@ func (s *Builder) prepareDeployment(
 	// The server needs the password it hands consumers. Without it in the
 	// Secret, the StatefulSet ran the image's bare redis-server: open to any
 	// client, and refusing the AUTH every consumer's connection sends.
-	// REDISCLI_AUTH lets the probes' redis-cli ping authenticate.
+	// REDISCLI_AUTH lets the probes' redis-cli ping authenticate. Replicas read
+	// the same Secret, for their own password and to authenticate to the
+	// primary.
 	if s.redisPassword != "" {
 		deployment.AddSecrets(
 			resources.Env("REDIS_PASSWORD", s.redisPassword),
 			resources.Env("REDISCLI_AUTH", s.redisPassword),
 		)
 	}
+	if parameters.Replicas > 0 {
+		s.addReadConnection(configuration, readInstance)
+	}
 	return configuration, nil
 }
 
 // servicePorts lists the ports the rendered Service publishes: one per TCP
 // endpoint this service declares. Core hands each sibling alias of an API its
-// own derived port, but redis answers all of them from a single process on
-// 6379, so every advertised port has to be published and folded back onto it.
-func (s *Builder) servicePorts(ctx context.Context, mappings []*v0.NetworkMapping) ([]servicePort, error) {
+// own derived port. Without replicas redis answers all of them from a single
+// process on 6379, so every advertised port has to be published and folded back
+// onto it. With replicas the serving endpoint's port targets the primary and
+// every other alias's port targets the replicas.
+func (s *Builder) servicePorts(ctx context.Context, mappings []*v0.NetworkMapping, replicas bool) ([]servicePort, error) {
 	var ports []servicePort
+	published := map[uint32]string{}
 	for _, mapping := range mappings {
 		endpoint := mapping.GetEndpoint()
 		if endpoint.GetApi() != standards.TCP ||
@@ -236,7 +274,19 @@ func (s *Builder) servicePorts(ctx context.Context, mappings []*v0.NetworkMappin
 		// the endpoint is called: endpoint names are author-supplied and may be
 		// longer than the 15 characters Kubernetes allows, or carry characters it
 		// rejects, and nothing here renders a manifest the API server would take.
-		ports = append(ports, servicePort{Name: fmt.Sprintf("redis-%d", instance.GetPort()), Port: instance.GetPort()})
+		target := "6379"
+		if replicas {
+			target = "replica"
+			if endpoint.GetName() == s.TcpEndpoint.GetName() {
+				target = "primary"
+			}
+			// One port cannot route to two sets of pods.
+			if other, taken := published[instance.GetPort()]; taken {
+				return nil, fmt.Errorf("endpoints %q and %q are both published on port %d; with read replicas each needs its own port", other, endpoint.GetName(), instance.GetPort())
+			}
+		}
+		published[instance.GetPort()] = endpoint.GetName()
+		ports = append(ports, servicePort{Name: fmt.Sprintf("redis-%d", instance.GetPort()), Port: instance.GetPort(), Target: target})
 	}
 	// A multi-port Service must name every port; a single-port one need not, and
 	// leaving it anonymous keeps single-endpoint Services rendering as they do today.

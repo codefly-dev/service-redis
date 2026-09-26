@@ -1,9 +1,8 @@
 // Package cache is service-redis's implementation of the codefly.dev/cache
-// interface (github.com/codefly-dev/interface-cache): a cache layer for any
-// server speaking the Redis protocol — Redis, Valkey, ElastiCache,
-// Memorystore. It is a Leaser, so a miss reaches the origin once across every
-// process sharing the server, and a Notifier, so in-process layers above it
-// drop a key another process changed.
+// interface (github.com/codefly-dev/interface-cache): a cache layer for a
+// server speaking the Redis protocol. It is a Leaser, so a miss reaches the
+// origin once across every process sharing the server, and a Notifier, so
+// in-process layers above it drop a key another process changed.
 //
 // Importing it registers the "redis" driver with cache.Open. The connection is
 // the redis:// URL service-redis emits in its "cache" configuration group.
@@ -12,6 +11,30 @@
 //	import rediscache "github.com/codefly-dev/service-redis/cache"
 //
 // It is its own Go module, so importing it does not pull in the agent.
+//
+// # What has been run
+//
+// service-redis's TestRealRedisCache* runs the interface's conformance suite
+// against:
+//
+//   - Redis as service-redis's own Runtime runs it, the pinned image under
+//     Docker and the nix-provisioned server, single-process and as a primary
+//     with read replicas;
+//   - Valkey 9.1.2;
+//   - a local Redis Cluster of three primaries, through New with a
+//     goredis.ClusterClient. Keys for one cache key share a hash tag, so the
+//     two-key scripts stay in one slot. Open only builds single-server
+//     clients: a cluster connection string is not supported.
+//
+// Not run: TLS (rediss://), which go-redis parses but no test has served; and
+// managed offerings such as ElastiCache or Memorystore, which CI cannot reach.
+// Nothing here claims they work.
+//
+// # Read replicas
+//
+// service-redis's cache group always names the primary, so a layer opened from
+// it reads and writes there. WithReplica reads through a replica instead; see
+// it for what that costs.
 package cache
 
 import (
@@ -53,6 +76,8 @@ func Open(_ context.Context, cfg cache.Config) (cache.Layer, error) {
 // Layer is a cache.Layer over one Redis keyspace.
 type Layer struct {
 	client goredis.UniversalClient
+	// reader serves Get and Subscribe: client, or a replica given WithReplica.
+	reader goredis.UniversalClient
 	prefix string
 	origin string // identifies this client's own invalidations
 }
@@ -69,11 +94,38 @@ type Option func(*Layer)
 // share one server. Default "cache".
 func WithPrefix(prefix string) Option { return func(l *Layer) { l.prefix = prefix } }
 
+// WithReplica reads through replica, a read replica of the client New is given:
+// Get is served by it, and so are the notices Subscribe delivers. Sets,
+// deletes, leases and fills still go to the primary, which is the only server
+// that accepts them.
+//
+// Notices come from the replica because a replica applies the primary's writes
+// in order: the notice a write publishes reaches a subscriber on the replica
+// only after the write itself has, so re-reading on a notice never finds the
+// old value there. A subscriber on the primary could be told first, re-read
+// from a replica that has not caught up, and keep that stale value.
+//
+// Replication is asynchronous, so a Get straight after this layer's own Set
+// can still find the previous value on the replica: the layer alone does not
+// read its own writes. In a Stack the Set also stores the value in the tiers
+// above, so the writing process reads it from there. What remains is a process
+// that loses its in-process copy and re-reads within the replication lag: it
+// can refill the previous value, and the notice that would correct it is its
+// own, which Subscribe does not deliver back to it. On service-redis's local
+// servers the lag measured below 2ms at p99, with a worst case of 13ms under
+// Docker's port proxy (TestRealRedisCacheReplicas*, ReplicationLag).
+func WithReplica(replica goredis.UniversalClient) Option {
+	return func(l *Layer) { l.reader = replica }
+}
+
 // New returns a Layer using client. The caller owns client.
 func New(client goredis.UniversalClient, opts ...Option) *Layer {
 	l := &Layer{client: client, prefix: "cache", origin: randomToken()}
 	for _, opt := range opts {
 		opt(l)
+	}
+	if l.reader == nil {
+		l.reader = l.client
 	}
 	return l
 }
@@ -86,7 +138,7 @@ func (l *Layer) channel() string            { return l.prefix + ":invalidations"
 
 // Get implements cache.Layer.
 func (l *Layer) Get(ctx context.Context, key string) (cache.Entry, error) {
-	raw, err := l.client.Get(ctx, l.valueKey(key)).Bytes()
+	raw, err := l.reader.Get(ctx, l.valueKey(key)).Bytes()
 	if errors.Is(err, goredis.Nil) {
 		return cache.Entry{}, cache.ErrMiss
 	}
@@ -176,7 +228,7 @@ func (l *Layer) Release(ctx context.Context, lease cache.Lease) error {
 // notice published while this client is disconnected is lost, and layers
 // above then keep that key until their own TTL.
 func (l *Layer) Subscribe(ctx context.Context, fn func(key string)) (func(), error) {
-	sub := l.client.Subscribe(ctx, l.channel())
+	sub := l.reader.Subscribe(ctx, l.channel())
 	if _, err := sub.Receive(ctx); err != nil {
 		_ = sub.Close()
 		return nil, err

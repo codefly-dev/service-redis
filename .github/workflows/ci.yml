@@ -21,7 +21,9 @@ jobs:
     uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
 
   # Socket fixtures pin the readiness protocol; only a real server proves redis
-  # agrees with it. This job runs both backends with real credentials, and
+  # agrees with it. This job runs both backends with real credentials — the
+  # Runtime with and without read replicas, and the codefly.dev/cache suite
+  # through it, plus Valkey and a local Redis Cluster — and
   # REDIS_INFRA_TESTS=required turns a missing backend into a failure so the job
   # cannot pass by skipping.
   infrastructure:
@@ -43,7 +45,7 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Readiness against real redis
+      - name: Real redis, replicas and cache over docker and nix
         env:
           REDIS_INFRA_TESTS: required
         run: go test -run TestRealRedis -count=1 -v -timeout 30m ./...

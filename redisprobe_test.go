@@ -109,15 +109,22 @@ func TestProbeRedisRequiresParsedPong(t *testing.T) {
 type authRedis struct {
 	listener net.Listener
 	password string
+	// info is the reply to INFO, verbatim; empty answers it as unknown.
+	info string
 }
 
 func newAuthRedis(t *testing.T, password string) *authRedis {
+	t.Helper()
+	return serveAuthRedis(t, &authRedis{password: password})
+}
+
+func serveAuthRedis(t *testing.T, server *authRedis) *authRedis {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	server := &authRedis{listener: listener, password: password}
+	server.listener = listener
 	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
 		for {
@@ -156,6 +163,8 @@ func (s *authRedis) handle(conn net.Conn) {
 				continue
 			}
 			_, _ = io.WriteString(conn, "+PONG\r\n")
+		case len(command) >= 1 && strings.EqualFold(command[0], "INFO") && s.info != "":
+			_, _ = io.WriteString(conn, s.info)
 		default:
 			_, _ = io.WriteString(conn, "-ERR unknown command\r\n")
 		}

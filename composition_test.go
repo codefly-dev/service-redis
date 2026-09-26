@@ -68,7 +68,7 @@ func TestConnectionStringEscapesPassword(t *testing.T) {
 
 func TestRedisDockerCommandKeepsPasswordOutOfArgv(t *testing.T) {
 	password := `secret with spaces`
-	args := redisDockerCommand()
+	args := redisDockerCommand(true, 0)
 	if strings.Contains(strings.Join(args, " "), password) {
 		t.Fatal("redis password leaked into Docker process argv")
 	}

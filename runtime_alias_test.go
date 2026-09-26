@@ -37,7 +37,7 @@ func TestRedisRuntimeMappingsPreserveViewsAndProposal(t *testing.T) {
 	public.Access = resources.NewPublicNetworkAccess()
 	write.Instances = append(write.Instances, public)
 	before := proto.Clone(read)
-	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint)
+	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +64,10 @@ func TestRedisRuntimeMappingsPreserveViewsAndProposal(t *testing.T) {
 func TestRedisRuntimeMappingsRejectMissingAccessView(t *testing.T) {
 	read, write := proposedRedisMapping("read", 16001), proposedRedisMapping("write", 16002)
 	write.Instances = write.Instances[:1]
-	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint); err == nil {
+	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint, nil); err == nil {
 		t.Fatal("container alias accepted without a serving container address")
 	}
-	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read}, write.Endpoint); err == nil {
+	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read}, write.Endpoint, nil); err == nil {
 		t.Fatal("missing primary mapping accepted")
 	}
 }
@@ -76,7 +76,7 @@ func TestRedisRuntimeMappingsSingleEndpointAndOtherAPI(t *testing.T) {
 	primary := proposedRedisMapping("tcp", 16001)
 	other := proposedRedisMapping("metrics", 16002)
 	other.Endpoint.Api = "http"
-	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{primary, other}, primary.Endpoint)
+	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{primary, other}, primary.Endpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestRedisRuntimeMappingsRejectMalformedAliases(t *testing.T) {
 			case "foreign-service":
 				read.Endpoint.Service = "other"
 			}
-			if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, serving); err == nil {
+			if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, serving, nil); err == nil {
 				t.Fatal("malformed proposal accepted")
 			}
 		})

@@ -117,3 +117,8 @@ require (
 )
 
 replace github.com/codefly-dev/service-redis/cache => ./cache
+
+// TEMPORARY: go/cache 0.2.0 (identity partitions) from the head of
+// codefly-dev/interface-cache#6, which is not merged or tagged. Replace with a
+// require of github.com/codefly-dev/interface-cache/go/cache v0.2.0 once tagged.
+replace github.com/codefly-dev/interface-cache/go/cache => github.com/codefly-dev/interface-cache/go/cache v0.1.1-0.20260926150409-cb0b85287daf

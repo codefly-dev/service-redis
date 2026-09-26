@@ -5,25 +5,22 @@ package main
 // The agent emits a "cache" configuration group naming the driver this
 // repository ships (./cache). These tests read that group back the way a
 // consumer does, open the driver from it, and hold the result to the
-// interface's conformance suite against the redis the runtime actually starts:
-// the pinned image under Docker and the nix-provisioned server.
+// interface's conformance suite against the redis this agent's own Runtime
+// starts (runtimeredis_test.go): the pinned image under Docker and the
+// nix-provisioned server, single-process and with read replicas.
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"strconv"
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
-
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
-	runners "github.com/codefly-dev/core/runners/base"
 	cacheiface "github.com/codefly-dev/interface-cache/go/cache"
 	"github.com/codefly-dev/interface-cache/go/cache/cachetest"
 	rediscache "github.com/codefly-dev/service-redis/cache"
@@ -118,67 +115,91 @@ func TestCacheOpensFromEmittedConfiguration(t *testing.T) {
 	}
 }
 
-func TestRealRedisCacheOverDocker(t *testing.T) {
-	requireDocker(t)
-	const password = "cache-docker-7PzQm2"
-	address := startRealRedis(t, password)
-	if err := waitForRedisPong(context.Background(), redisWaitOptions{
-		address: address, password: password, budget: redisDockerReadinessBudget,
-	}); err != nil {
-		t.Fatalf("waitForRedisPong(%s): %v", address, err)
+// The whole codefly.dev/cache suite, against redis as this agent's Runtime runs
+// it, reached only through the configuration Init emitted: single-process and
+// with read replicas, over both backends.
+func TestRealRedisCacheOverDocker(t *testing.T) { testRuntimeCache(t, dockerBackend, 0) }
+func TestRealRedisCacheOverNix(t *testing.T)    { testRuntimeCache(t, nixBackend, 0) }
+
+func TestRealRedisCacheReplicasOverDocker(t *testing.T) { testRuntimeCache(t, dockerBackend, 2) }
+func TestRealRedisCacheReplicasOverNix(t *testing.T)    { testRuntimeCache(t, nixBackend, 2) }
+
+func testRuntimeCache(t *testing.T, backend redisBackend, replicas int) {
+	password := fmt.Sprintf("cache-%s-%d-7PzQm2", backend, replicas)
+	r := startRuntimeRedis(t, backend, replicas, password)
+	runCacheInterface(t, r.consumer(t), password)
+	if replicas > 0 {
+		t.Run("Replicas", func(t *testing.T) { runReplicaCache(t, r) })
 	}
-	runCacheInterface(t, address, password)
 }
 
-func TestRealRedisCacheOverNix(t *testing.T) {
-	if !runners.CheckNixInstalled() {
-		requireInfrastructure(t, "nix is not installed")
-	}
-	const password = "cache-nix-3VrLk9"
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := uint16(listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
-
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-	server, err := newNixRedis(ctx, t.TempDir(), port, password, io.Discard)
-	if err != nil {
-		t.Fatalf("newNixRedis: %v", err)
-	}
-	if err = server.Init(ctx); err != nil {
-		t.Fatalf("nix redis Init: %v", err)
-	}
-	t.Cleanup(func() { _ = server.Stop(context.Background()) })
-
-	runCacheInterface(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), password)
+// connectionHarness gives each namespace its own client on connection, as
+// separate processes would have.
+func connectionHarness(connection string, opts ...rediscache.Option) cachetest.Harness {
+	return cachetest.Harness{New: func(t *testing.T, namespace string) cacheiface.Layer {
+		return rediscache.New(redisClient(t, connection), append([]rediscache.Option{rediscache.WithPrefix(namespace)}, opts...)...)
+	}}
 }
 
-// runCacheInterface holds the redis at address to codefly.dev/cache, reached
-// only through the configuration the agent emits for it.
-func runCacheInterface(t *testing.T, address, password string) {
-	conf := emitted{connectionConfiguration(t, address, password)}
+// runCacheSuite is the interface's conformance, plus what a stack over the
+// layer owes a consumer: a write elsewhere evicts its in-process copy.
+func runCacheSuite(t *testing.T, harness cachetest.Harness) {
+	t.Run("Conformance", func(t *testing.T) { cachetest.Run(t, harness) })
+	t.Run("FillOnceAcrossProcesses", func(t *testing.T) { cachetest.RunStack(t, harness) })
+
+	t.Run("RemoteWriteEvictsMemory", func(t *testing.T) {
+		ctx := context.Background()
+		ns := cachetest.Namespace(t)
+		p := cacheiface.NewPartition("tenant-" + ns)
+		stack := func() *cacheiface.Stack {
+			s, err := cacheiface.New(ctx,
+				cacheiface.WithTier(cacheiface.NewMemory(), time.Hour),
+				cacheiface.WithTier(harness.New(t, ns), time.Hour),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(s.Close)
+			return s
+		}
+		a, b := stack(), stack()
+		if err := a.Set(ctx, p, "k", []byte("one")); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := b.Get(ctx, p, "k"); err != nil || string(v) != "one" {
+			t.Fatalf("b.Get = %q, %v", v, err)
+		}
+		if err := a.Set(ctx, p, "k", []byte("two")); err != nil {
+			t.Fatal(err)
+		}
+		eventuallyGets(t, b, p, "k", "two", 3*time.Second)
+	})
+}
+
+// eventuallyGets waits for s to serve want for key.
+func eventuallyGets(t *testing.T, s *cacheiface.Stack, p cacheiface.Partition, key, want string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		v, err := s.Get(context.Background(), p, key)
+		if err == nil && string(v) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("still serving %q (%v) %s after the write of %q", v, err, within, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// runCacheInterface holds the redis conf describes to codefly.dev/cache,
+// reached only through that configuration.
+func runCacheInterface(t *testing.T, conf emitted, password string) {
 	connection, err := conf.Secret(cacheiface.Group, cacheiface.KeyConnection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Each namespace gets its own client, as separate processes would.
-	harness := cachetest.Harness{New: func(t *testing.T, namespace string) cacheiface.Layer {
-		opts, err := goredis.ParseURL(connection)
-		if err != nil {
-			t.Fatal(err)
-		}
-		client := goredis.NewClient(opts)
-		t.Cleanup(func() { _ = client.Close() })
-		return rediscache.New(client, rediscache.WithPrefix(namespace))
-	}}
-
-	t.Run("Conformance", func(t *testing.T) { cachetest.Run(t, harness) })
-	t.Run("FillOnceAcrossProcesses", func(t *testing.T) { cachetest.RunStack(t, harness) })
+	runCacheSuite(t, connectionHarness(connection))
 
 	t.Run("OpenThroughTheInterface", func(t *testing.T) {
 		ctx := context.Background()
@@ -192,43 +213,6 @@ func runCacheInterface(t *testing.T, address, password string) {
 		}
 		if _, err := layer.Get(ctx, key); err != nil {
 			t.Fatalf("layer opened from the emitted configuration cannot read: %v", err)
-		}
-	})
-
-	t.Run("RemoteWriteEvictsMemory", func(t *testing.T) {
-		ctx := context.Background()
-		ns := cachetest.Namespace(t)
-		stack := func() *cacheiface.Stack {
-			s, err := cacheiface.New(ctx,
-				cacheiface.WithTier(cacheiface.NewMemory(), time.Hour),
-				cacheiface.WithTier(harness.New(t, ns), time.Hour),
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(s.Close)
-			return s
-		}
-		a, b := stack(), stack()
-		if err := a.Set(ctx, "k", []byte("one")); err != nil {
-			t.Fatal(err)
-		}
-		if v, err := b.Get(ctx, "k"); err != nil || string(v) != "one" {
-			t.Fatalf("b.Get = %q, %v", v, err)
-		}
-		if err := a.Set(ctx, "k", []byte("two")); err != nil {
-			t.Fatal(err)
-		}
-		deadline := time.Now().Add(3 * time.Second)
-		for {
-			v, err := b.Get(ctx, "k")
-			if err == nil && string(v) == "two" {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("b still serves %q from memory after a's write", v)
-			}
-			time.Sleep(20 * time.Millisecond)
 		}
 	})
 
@@ -275,7 +259,7 @@ func TestCacheDegradesWhenRedisIsUnreachable(t *testing.T) {
 	}
 	defer s.Close()
 	for range 10 {
-		v, err := s.Get(ctx, "k")
+		v, err := s.Get(ctx, cacheiface.NewPartition("tenant"), "k")
 		if err != nil || string(v) != "from origin" {
 			t.Fatalf("Get with redis down = %q, %v; want the origin's value", v, err)
 		}

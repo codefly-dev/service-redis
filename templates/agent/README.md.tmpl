@@ -8,6 +8,37 @@ This service provides a Docker-managed Redis instance for caching and data stora
 
 This service provides a local Redis instance for development and testing purposes.
 
+## Read replicas
+
+```yaml
+endpoints:
+  - name: read
+    api: tcp
+  - name: write
+    api: tcp
+spec:
+  with-read-replicas: true
+  read-replicas: 2   # optional, defaults to 1
+```
+
+The `write` endpoint (or the only other one) is the primary; `read`, and any
+other TCP endpoint, are served by the replicas, which replicate the primary with
+the same password and refuse writes. A replica counts as ready only once its link
+to the primary is up.
+
+- Configuration: `redis.connection` names the primary, `redis.read-connection`
+  the replicas. The `cache` group always names the primary.
+- Locally (Docker or nix) a read endpoint has one address, so it reaches the
+  first replica; further replicas run, replicate and are held to the same
+  readiness on ports of their own, but no local endpoint routes to them. Under
+  Docker the primary and its replicas share one container.
+- In Kubernetes the primary and the replicas are two StatefulSets behind the
+  one Service: the write port reaches only the primary, the read port balances
+  across every replica. Replicas keep their data in an `emptyDir` and resync
+  from the primary when they restart.
+
+Without `with-read-replicas`, one redis serves every declared endpoint.
+
 ## Redis version
 
 The container runtime serves the Redis version baked into the pinned runtime
