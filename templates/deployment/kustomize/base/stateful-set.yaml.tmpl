@@ -13,6 +13,9 @@ spec:
     metadata:
       labels:
         app: {{.Name}}
+{{- if .Deployment.Parameters.Replicas }}
+        redis.codefly.dev/set: {{.Name}}
+{{- end }}
     spec:
       automountServiceAccountToken: false
       # uid 999 = redis user in the official Redis Alpine image.
@@ -41,7 +44,13 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           ports:
+{{- if .Deployment.Parameters.Replicas }}
+            # The Service's write port targets this name, which replicas do not
+            # declare, so writes only ever reach the primary.
+            - name: primary
+{{- else }}
             - name: redis
+{{- end }}
               containerPort: 6379
 {{- if not .Restricted }}
           # The builder puts REDIS_PASSWORD in this Secret whenever a password is
@@ -118,3 +127,126 @@ spec:
         resources:
           requests:
             storage: 1Gi
+{{- with .Deployment.Parameters.ReplicaOf }}
+---
+# Read replicas: each replicates the primary through the primary's own
+# endpoint and refuses writes. The Service's read port targets the "replica"
+# port only these pods declare.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{$.Name}}-replica
+  namespace: {{$.Namespace}}
+spec:
+  serviceName: {{$.Name}}
+  replicas: {{$.Deployment.Parameters.Replicas}}
+  selector:
+    matchLabels:
+      app: {{$.Name}}-replica
+  template:
+    metadata:
+      labels:
+        app: {{$.Name}}-replica
+        redis.codefly.dev/set: {{$.Name}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: redis
+          image: {{ $.Image }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 999
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: replica
+              containerPort: 6379
+{{- if not $.Restricted }}
+          # As the primary: the builder puts REDIS_PASSWORD and REDISCLI_AUTH in
+          # this Secret whenever a password is configured, and a replica uses it
+          # for its own clients and to authenticate to the primary.
+          command:
+            - sh
+            - -c
+            - 'if [ -n "$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" --replicaof {{ .Host }} {{ .Port }}; else exec redis-server --replicaof {{ .Host }} {{ .Port }}; fi'
+          envFrom:
+            - secretRef:
+                name: {{$.Name}}-secret
+{{- else if $.Deployment.Parameters.PasswordReference }}
+{{- with $.Deployment.Parameters.PasswordReference }}
+          command:
+            - sh
+            - -c
+            - 'test -n "$REDIS_PASSWORD" && exec redis-server --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" --replicaof {{ $.Deployment.Parameters.ReplicaOf.Host }} {{ $.Deployment.Parameters.ReplicaOf.Port }}'
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Name }}
+                  key: {{ .Key }}
+                  optional: false
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Name }}
+                  key: {{ .Key }}
+                  optional: false
+{{- end }}
+{{- else }}
+          command:
+            - sh
+            - -c
+            - 'exec redis-server --replicaof {{ .Host }} {{ .Port }}'
+{{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 2
+            failureThreshold: 30
+          # A replica answers PING long before it holds the primary's data: it
+          # is ready only once its link to the primary is up.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli info replication | grep -q '^master_link_status:up'"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            # A replica's data is a copy it resyncs from the primary on start.
+            - name: redis-data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: redis-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

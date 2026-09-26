@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	goredis "github.com/redis/go-redis/v9"
 	"gopkg.in/yaml.v3"
@@ -179,5 +180,149 @@ func TestRealRedisEphemeralDeploymentAuthenticates(t *testing.T) {
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatal("timed out")
+	}
+}
+
+// renderEphemeralReplicas deploys a read/write service with one replica under
+// the ephemeral profile. The write endpoint is published on 6379, so the
+// address a replica is rendered to replicate is where the primary container
+// itself listens.
+func renderEphemeralReplicas(t *testing.T, password string) (primary, replica renderedStatefulSet, secret map[string]string) {
+	t.Helper()
+	useSuccessfulKubectl(t)
+	builder, _ := newDeploymentTestBuilder(t)
+	builder.Password, builder.RequirePass = password, password != ""
+	builder.WithReadReplicas = true
+	read := deploymentAliasMapping(builder, "read", 16001)
+	write := deploymentAliasMapping(builder, "write", 6379)
+	if err := builder.resolveTCPEndpoints(context.Background(), []*basev0.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
+		t.Fatal(err)
+	}
+	destination := t.TempDir()
+	request := restrictedDeploymentRequest(destination, []*basev0.NetworkMapping{read, write}, nil, false)
+	request.Deployment.GetKubernetes().Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
+	response, err := builder.Deploy(context.Background(), request)
+	if err != nil || response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+		t.Fatalf("Deploy: %v, %v", response.GetState(), err)
+	}
+	sets := parseStatefulSets(t, destination)
+	if len(sets) != 2 {
+		t.Fatalf("rendered %d StatefulSets, want the primary and the replicas", len(sets))
+	}
+	var rendered struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal([]byte(readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	secret = map[string]string{}
+	for k, v := range rendered.Data {
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			t.Fatalf("secret %s is not base64: %v", k, err)
+		}
+		secret[k] = string(decoded)
+	}
+	return sets[0], sets[1], secret
+}
+
+func TestEphemeralReplicasUseTheSecret(t *testing.T) {
+	const password = "ephemeral-replica-3Rk8"
+	_, replica, secret := renderEphemeralReplicas(t, password)
+	container := replica.Spec.Template.Spec.Containers[0]
+	command := strings.Join(container.Command, " ")
+	for _, want := range []string{`--requirepass "$REDIS_PASSWORD"`, `--masterauth "$REDIS_PASSWORD"`, `--replicaof redis.codefly-test.svc.cluster.local 6379`} {
+		if !strings.Contains(command, want) {
+			t.Errorf("replica command %q does not contain %q", command, want)
+		}
+	}
+	if strings.Contains(command, password) {
+		t.Fatal("the password leaked into the replica command")
+	}
+	if secret["REDIS_PASSWORD"] != password || secret["REDISCLI_AUTH"] != password {
+		t.Fatalf("Secret = %v, want REDIS_PASSWORD and REDISCLI_AUTH set to the password", secret)
+	}
+}
+
+// The rendered primary and replica, run for real: the pinned image with
+// exactly the rendered commands and the rendered Secret as their environment,
+// on a network where the primary answers at the host the replica was rendered
+// to replicate, as the Service makes it answer in the cluster.
+func TestRealRedisEphemeralReplicasAuthenticate(t *testing.T) {
+	requireDocker(t)
+	const password = "ephemeral-replica-real-6Tq1"
+	primarySet, replicaSet, secret := renderEphemeralReplicas(t, password)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	network := fmt.Sprintf("service-redis-replicas-%d", time.Now().UnixNano())
+	if out, err := exec.CommandContext(ctx, "docker", "network", "create", network).CombinedOutput(); err != nil {
+		t.Fatalf("docker network create: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "network", "rm", network).Run() })
+	run := func(set renderedStatefulSet, extra ...string) string {
+		container := set.Spec.Template.Spec.Containers[0]
+		name := fmt.Sprintf("service-redis-%s-%d", set.Metadata.Name, time.Now().UnixNano())
+		args := append([]string{"run", "--detach", "--rm", "--name", name, "--network", network}, extra...)
+		for k, v := range secret {
+			args = append(args, "--env", k+"="+v)
+		}
+		args = append(args, "--entrypoint", container.Command[0], image.FullName())
+		args = append(args, container.Command[1:]...)
+		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+			t.Fatalf("docker run %s: %v\n%s", set.Metadata.Name, err, out)
+		}
+		t.Cleanup(func() { _ = exec.Command("docker", "rm", "--force", name).Run() })
+		return name
+	}
+	primary := run(primarySet, "--network-alias", "redis.codefly-test.svc.cluster.local", "--publish", "127.0.0.1::6379")
+	replica := run(replicaSet, "--publish", "127.0.0.1::6379")
+	address := func(name string) string {
+		published, err := exec.CommandContext(ctx, "docker", "port", name, "6379/tcp").Output()
+		if err != nil {
+			t.Fatalf("docker port: %v", err)
+		}
+		return strings.TrimSpace(strings.SplitN(string(published), "\n", 2)[0])
+	}
+	primaryAddress, replicaAddress := address(primary), address(replica)
+
+	// The replica is ready only by the rendered probe, run as rendered: it
+	// authenticates through REDISCLI_AUTH and requires the link to be up.
+	probe := replicaSet.Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(500 * time.Millisecond) {
+		if exec.CommandContext(ctx, "docker", append([]string{"exec", replica}, probe...)...).Run() == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			out, _ := exec.Command("docker", "logs", replica).CombinedOutput()
+			t.Fatalf("the rendered replica never passed its rendered readiness probe %q\n%s", probe, out)
+		}
+	}
+	if err := waitForRedisPong(ctx, redisWaitOptions{address: replicaAddress, password: password, replica: true, budget: redisDockerReadinessBudget}); err != nil {
+		t.Fatalf("replica not linked with the configured password: %v", err)
+	}
+
+	anonymous := goredis.NewClient(&goredis.Options{Addr: replicaAddress})
+	defer anonymous.Close()
+	if err := anonymous.Get(ctx, "k").Err(); err == nil || !strings.Contains(err.Error(), "NOAUTH") {
+		t.Fatalf("unauthenticated GET on the replica = %v, want NOAUTH", err)
+	}
+	onReplica := goredis.NewClient(&goredis.Options{Addr: replicaAddress, Password: password})
+	defer onReplica.Close()
+	if err := onReplica.Set(ctx, "k", "v", 0).Err(); err == nil || !strings.Contains(err.Error(), "READONLY") {
+		t.Fatalf("SET on the replica = %v, want READONLY", err)
+	}
+	onPrimary := goredis.NewClient(&goredis.Options{Addr: primaryAddress, Password: password})
+	defer onPrimary.Close()
+	if err := onPrimary.Set(ctx, "k", "from-the-primary", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if v, _ := onReplica.Get(ctx, "k").Result(); v == "from-the-primary" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the primary's write never reached the replica")
+		}
 	}
 }

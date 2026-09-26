@@ -14,6 +14,11 @@ package main
 // Both runtimes serve on the same assigned port, so the rest of the agent
 // (WaitForReady, connection strings) is unchanged.
 //
+// With read replicas, the primary's handle also owns one native server per
+// replica, each started with `replicaof` the primary and each with its own
+// state root. They start after the primary and stop before it, so ownership of
+// the whole set stays one handle.
+//
 // On-disk state is split by mutability. The embedded flake and its nix
 // materialization cache are immutable and identical for every invocation, so
 // they live in one content-addressed root shared by all of them. The
@@ -112,6 +117,13 @@ type nixRedis struct {
 	// sharedNixRoot holds the immutable flake and its materialization cache,
 	// shared by every invocation on this host.
 	sharedNixRoot string
+	// primaryPort is the loopback port of the primary this server replicates,
+	// and 0 for a primary.
+	primaryPort uint16
+	// replicas are the read replicas of this primary, owned through it: Init
+	// starts them once it serves, Stop stops them first, Supervise watches them.
+	// Guarded by mu.
+	replicas []*nixRedis
 }
 
 // newNixRedis prepares a native redis whose mutable, credential-bearing state
@@ -170,6 +182,35 @@ func redisStateKey(serviceLocation, namingScope string) string {
 		return serviceLocation
 	}
 	return serviceLocation + "\x00naming-scope\x00" + namingScope
+}
+
+// redisReplicaStateKey is the state key of replica i of the redis at stateKey.
+// Each replica has its own config and data, claimed like the primary's, so two
+// invocations cannot share one either.
+func redisReplicaStateKey(stateKey string, i int) string {
+	return stateKey + "\x00replica\x00" + strconv.Itoa(i)
+}
+
+// attachReplicas prepares one replica of n per port. They are claimed now and
+// started by Init. A failure releases the replicas prepared so far and leaves n
+// as it was.
+func (n *nixRedis) attachReplicas(ctx context.Context, stateKey string, ports []uint16) error {
+	replicas := make([]*nixRedis, 0, len(ports))
+	for i, port := range ports {
+		replica, err := newNixRedis(ctx, redisReplicaStateKey(stateKey, i+1), port, n.password, n.out)
+		if err != nil {
+			for _, prepared := range replicas {
+				releaseRuntimeRoot(prepared.owner)
+			}
+			return fmt.Errorf("prepare redis replica %d: %w", i+1, err)
+		}
+		replica.primaryPort = n.port
+		replicas = append(replicas, replica)
+	}
+	n.mu.Lock()
+	n.replicas = replicas
+	n.mu.Unlock()
+	return nil
 }
 
 func redisServiceHash(stateKey string) string {
@@ -395,6 +436,31 @@ func (n *nixRedis) Init(ctx context.Context) (err error) {
 	if err := n.writeConfig(); err != nil {
 		return err
 	}
+	if err := n.launch(ctx); err != nil {
+		return err
+	}
+	n.mu.Lock()
+	replicas := n.replicas
+	n.mu.Unlock()
+	for i, replica := range replicas {
+		if err := replica.initReplica(ctx, n.serverPath); err != nil {
+			return fmt.Errorf("redis replica %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// initReplica starts a replica off the primary's already resolved server:
+// resolving it again would evaluate the shared flake once more for the same
+// answer.
+func (n *nixRedis) initReplica(ctx context.Context, serverPath string) error {
+	n.serverPath = serverPath
+	if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
+		return fmt.Errorf("create redis data dir: %w", err)
+	}
+	if err := n.writeConfig(); err != nil {
+		return err
+	}
 	return n.launch(ctx)
 }
 
@@ -543,6 +609,14 @@ func (n *nixRedis) writeConfig() error {
 	if n.password != "" {
 		lines = append(lines, "requirepass "+strconv.Quote(n.password))
 	}
+	if n.primaryPort != 0 {
+		// A replica authenticates to its primary with the same credentials
+		// its own clients use, and refuses writes: writes go to the primary.
+		lines = append(lines, "replicaof 127.0.0.1 "+strconv.Itoa(int(n.primaryPort)), "replica-read-only yes")
+		if n.password != "" {
+			lines = append(lines, "masterauth "+strconv.Quote(n.password))
+		}
+	}
 	contents := []byte(strings.Join(lines, "\n") + "\n")
 	if err := writeFileAtomic(n.configPath, contents, 0o600); err != nil {
 		return fmt.Errorf("write redis config: %w", err)
@@ -591,7 +665,7 @@ func (n *nixRedis) serverArgs() []string {
 // server answers an unauthenticated PING with "-NOAUTH …", which proves the
 // socket is open but not that the projected credentials work. A server that has
 // already exited is never ready: whatever answers on the port after that belongs
-// to someone else.
+// to someone else. A replica is ready only once its link to the primary is up.
 func (n *nixRedis) waitReady(ctx context.Context) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", n.port)
 	ctx, cancel := context.WithTimeout(ctx, redisReadyTimeout)
@@ -601,7 +675,11 @@ func (n *nixRedis) waitReady(ctx context.Context) error {
 		if exitErr, exited := n.exited(); exited {
 			return redisExitedBeforeReady(exitErr)
 		}
-		lastErr = probeRedis(ctx, addr, n.password)
+		if n.primaryPort != 0 {
+			lastErr = probeRedisReplica(ctx, addr, n.password)
+		} else {
+			lastErr = probeRedis(ctx, addr, n.password)
+		}
 		if lastErr == nil {
 			if exitErr, exited := n.exited(); exited {
 				return redisExitedBeforeReady(exitErr)
@@ -666,6 +744,14 @@ func redisExitedBeforeReady(err error) error {
 // remaining reader.
 func (n *nixRedis) Supervise(onExit func(error)) {
 	n.mu.Lock()
+	replicas := n.replicas
+	n.mu.Unlock()
+	// A replica that dies leaves the read endpoint serving nothing, which is
+	// as much a failed service as the primary dying.
+	for _, replica := range replicas {
+		replica.Supervise(onExit)
+	}
+	n.mu.Lock()
 	exit := n.serverExit
 	// Stop cancels serverCtx before terminating the process, so a cancelled
 	// context is the authoritative "this shutdown was orderly" signal.
@@ -711,6 +797,26 @@ func (n *nixRedis) Stop(ctx context.Context) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	// Replicas first: stopped after the primary, each would log a lost link and
+	// retry it until its own stop arrives. One that cannot be confirmed dead
+	// stays owned, for the same reasons the primary's handle does.
+	var replicaErr error
+	kept := n.replicas[:0]
+	for i, replica := range n.replicas {
+		if err := replica.Stop(ctx); err != nil {
+			replicaErr = errors.Join(replicaErr, fmt.Errorf("redis replica %d: %w", i+1, err))
+			kept = append(kept, replica)
+		}
+	}
+	n.replicas = kept
+	if err := n.stopServer(ctx); err != nil || replicaErr != nil {
+		return errors.Join(replicaErr, err)
+	}
+	return nil
+}
+
+// stopServer is Stop for this one process, with n.mu held.
+func (n *nixRedis) stopServer(ctx context.Context) error {
 	if n.serverCancel != nil {
 		n.serverCancel()
 	}

@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 	"sync"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -41,6 +45,9 @@ type Runtime struct {
 	nixRuntimeMu sync.Mutex
 
 	redisPort uint16
+	// replicaAddresses are the host addresses of the read replicas Init
+	// started, in order; empty without read replicas. Readiness covers each.
+	replicaAddresses []string
 }
 
 func NewRuntime() *Runtime {
@@ -95,11 +102,9 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		Requirements: requirements,
 		ResolveEndpoints: func(ctx context.Context, endpoints []*basev0.Endpoint) error {
 			s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(endpoints)))
-			endpoint, err := resolveServingTCPEndpoint(ctx, endpoints)
-			if err != nil {
+			if err := s.resolveTCPEndpoints(ctx, endpoints); err != nil {
 				return s.Wool.Wrapf(err, "cannot find TCP endpoint")
 			}
-			s.TcpEndpoint = endpoint
 			return nil
 		},
 	})
@@ -114,10 +119,24 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	w := s.Wool.In("runtime::init")
 
-	// This local runtime serves one Redis instance. All declared TCP aliases
-	// must report that instance's actual addresses, rather than the separate
+	replicas, err := s.replicaCount()
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	if replicas > 0 && s.ReadEndpoint == nil {
+		return s.Runtime.InitError(w.NewError("with-read-replicas is set but no endpoint was resolved for the replicas"))
+	}
+	var replicaEndpoint *basev0.Endpoint
+	if replicas > 0 {
+		replicaEndpoint = s.ReadEndpoint
+	}
+
+	// Without replicas this runtime serves one Redis process, and every TCP
+	// alias reports that process's actual addresses rather than the separate
 	// ports the orchestrator proposed before it knew the serving endpoint.
-	mappings, err := redisRuntimeMappings(ctx, req.ProposedNetworkMappings, s.TcpEndpoint)
+	// With replicas the serving endpoint is the primary and every other alias
+	// reports the replicas' addresses.
+	mappings, err := redisRuntimeMappings(ctx, req.ProposedNetworkMappings, s.TcpEndpoint, replicaEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -125,12 +144,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	configuration := req.GetConfiguration()
 
-	net, err := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TcpEndpoint)
+	serving, err := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	if net == nil {
+	if serving == nil {
 		return s.Runtime.InitError(w.NewError("network mapping is nil"))
 	}
 
@@ -154,11 +173,44 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Infof("will run on %s", instance.Host)
 	s.redisPort = 6379
 
+	// The first replica serves the replica endpoint's assigned port. A local
+	// alias has one address, so replicas beyond the first have no endpoint of
+	// their own: they take free loopback ports, replicate and are held to the
+	// same readiness, but no local consumer is routed to them. In Kubernetes
+	// the read Service balances across all of them.
+	var replicaPorts []uint16
+	s.replicaAddresses = nil
+	if replicas > 0 {
+		readInstance, errRead := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, replicaEndpoint, resources.NewNativeNetworkAccess())
+		if errRead != nil {
+			return s.Runtime.InitError(errRead)
+		}
+		if readInstance.GetPort() == instance.GetPort() {
+			return s.Runtime.InitError(w.NewError("endpoint %q and the replicas' endpoint %q resolve to the same port %d; the replicas need their own", s.TcpEndpoint.GetName(), replicaEndpoint.GetName(), instance.GetPort()))
+		}
+		extra, errPorts := reserveLoopbackPorts(replicas - 1)
+		if errPorts != nil {
+			return s.Runtime.InitError(errPorts)
+		}
+		replicaPorts = append([]uint16{uint16(readInstance.GetPort())}, extra...)
+		s.replicaAddresses = append(s.replicaAddresses, readInstance.GetAddress())
+		for _, port := range extra {
+			s.replicaAddresses = append(s.replicaAddresses, net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+		}
+	}
+
 	// Create connection string resources for the network instance
-	for _, inst := range net.Instances {
+	for _, inst := range serving.Instances {
 		conf, errConn := s.CreateConnectionConfiguration(ctx, configuration, inst)
 		if errConn != nil {
 			return s.Runtime.InitError(errConn)
+		}
+		if replicas > 0 {
+			readInstance, errRead := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, replicaEndpoint, inst.GetAccess())
+			if errRead != nil {
+				return s.Runtime.InitError(errRead)
+			}
+			s.addReadConnection(conf, readInstance)
 		}
 		w.Debug("adding configuration", wool.Field("config", resources.MakeConfigurationSummary(conf)), wool.Field("instance", inst))
 		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
@@ -190,7 +242,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		if errRelease := s.releaseNativeRuntime(ctx); errRelease != nil {
 			return s.Runtime.InitError(errRelease)
 		}
-		nixr, errNix := newNixRedis(ctx, redisStateKey(s.Location, s.Environment.GetNamingScope()), uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
+		stateKey := redisStateKey(s.Location, s.Environment.GetNamingScope())
+		nixr, errNix := newNixRedis(ctx, stateKey, uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}
@@ -199,6 +252,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		// reach it; retaining it here means a failed rollback still has an owner
 		// that Stop and Destroy can retry.
 		s.setNativeRuntime(nixr)
+		if errNix = nixr.attachReplicas(ctx, stateKey, replicaPorts); errNix != nil {
+			return s.Runtime.InitError(errors.Join(errNix, nixr.Stop(ctx)))
+		}
 		if errNix = nixr.Init(ctx); errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}
@@ -216,11 +272,20 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		}
 		runner.WithOutput(newRedisLogWriter(s.Wool))
 		runner.WithPortMapping(ctx, uint16(instance.Port), s.redisPort)
+		// Replicas run in the primary's container, each on its own internal
+		// port replicating the primary over the container's loopback: the
+		// docker runner offers no network between containers, and one
+		// container per set is also the failure domain the nix runtime has.
+		for i, port := range replicaPorts {
+			runner.WithPortMapping(ctx, port, redisContainerReplicaPort(i))
+		}
 		if s.redisPassword != "" {
 			runner.WithEnvironmentVariables(ctx,
 				resources.Env("REDIS_PASSWORD", s.redisPassword),
 			)
-			runner.WithCommand(redisDockerCommand()...)
+		}
+		if command := redisDockerCommand(s.redisPassword != "", replicas); command != nil {
+			runner.WithCommand(command...)
 		}
 		w.Debug("init for runner environment: will start container")
 		if errDocker = s.initializeDockerRuntime(ctx, runner); errDocker != nil {
@@ -232,21 +297,22 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	return s.Runtime.InitResponse()
 }
 
-func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping, serving *basev0.Endpoint) ([]*basev0.NetworkMapping, error) {
-	primary, err := resources.FindNetworkMapping(ctx, proposed, serving)
+// redisRuntimeMappings folds every declared TCP alias onto the process that
+// serves it: the serving endpoint's own views, or, when replicas is set, the
+// serving endpoint for itself and replicas' views for every other alias.
+func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping, serving *basev0.Endpoint, replicas *basev0.Endpoint) ([]*basev0.NetworkMapping, error) {
+	views, err := redisAccessViews(ctx, proposed, serving, "serving")
 	if err != nil {
 		return nil, err
 	}
-	if primary == nil {
-		return nil, fmt.Errorf("serving Redis network mapping is missing")
-	}
-	views := make(map[string]*basev0.NetworkInstance)
-	for _, instance := range primary.GetInstances() {
-		access := instance.GetAccess().GetKind()
-		if access == "" || views[access] != nil {
-			return nil, fmt.Errorf("serving Redis endpoint has a missing or duplicate access view")
+	replicaViews := views
+	if replicas != nil {
+		if replicas.GetName() == serving.GetName() {
+			return nil, fmt.Errorf("redis replicas cannot serve the primary's endpoint %q", serving.GetName())
 		}
-		views[access] = instance
+		if replicaViews, err = redisAccessViews(ctx, proposed, replicas, "replica"); err != nil {
+			return nil, err
+		}
 	}
 	accepted := make([]*basev0.NetworkMapping, 0, len(proposed))
 	for _, mapping := range proposed {
@@ -261,9 +327,13 @@ func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping
 			if len(mapping.GetInstances()) == 0 {
 				return nil, fmt.Errorf("redis TCP alias has no access views")
 			}
+			target := replicaViews
+			if mapping.Endpoint.Name == serving.GetName() {
+				target = views
+			}
 			for i, instance := range mapping.GetInstances() {
 				access := instance.GetAccess().GetKind()
-				actual := views[access]
+				actual := target[access]
 				if access == "" || actual == nil {
 					return nil, fmt.Errorf("serving Redis endpoint has no matching access view for %s", mapping.GetEndpoint().GetName())
 				}
@@ -275,10 +345,73 @@ func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping
 	return accepted, nil
 }
 
-func redisDockerCommand() []string {
-	// Keep the password out of docker inspect's process argv. The fixed shell
-	// fragment expands the container environment variable inside the container.
-	return []string{"sh", "-c", `exec redis-server --requirepass "$REDIS_PASSWORD"`}
+// redisAccessViews indexes the proposed mapping of endpoint by access kind.
+func redisAccessViews(ctx context.Context, proposed []*basev0.NetworkMapping, endpoint *basev0.Endpoint, role string) (map[string]*basev0.NetworkInstance, error) {
+	mapping, err := resources.FindNetworkMapping(ctx, proposed, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if mapping == nil {
+		return nil, fmt.Errorf("%s Redis network mapping is missing", role)
+	}
+	views := make(map[string]*basev0.NetworkInstance)
+	for _, instance := range mapping.GetInstances() {
+		access := instance.GetAccess().GetKind()
+		if access == "" || views[access] != nil {
+			return nil, fmt.Errorf("%s Redis endpoint has a missing or duplicate access view", role)
+		}
+		views[access] = instance
+	}
+	return views, nil
+}
+
+// redisContainerReplicaPort is the container-internal port of replica i, which
+// its assigned host port maps onto, as the primary's maps onto 6379.
+func redisContainerReplicaPort(i int) uint16 { return 6380 + uint16(i) }
+
+// redisDockerCommand runs the primary and, before it, one replica per
+// replicas, or returns nil when the image's own command already does: no
+// password and no replicas.
+//
+// Keep the password out of docker inspect's process argv. The fixed shell
+// fragment expands the container environment variable inside the container.
+func redisDockerCommand(password bool, replicas int) []string {
+	if !password && replicas == 0 {
+		return nil
+	}
+	var auth, replicaAuth string
+	if password {
+		auth = ` --requirepass "$REDIS_PASSWORD"`
+		replicaAuth = auth + ` --masterauth "$REDIS_PASSWORD"`
+	}
+	var script strings.Builder
+	for i := range replicas {
+		fmt.Fprintf(&script, "redis-server --port %d --replicaof 127.0.0.1 6379 --dbfilename replica-%d.rdb%s & ",
+			redisContainerReplicaPort(i), i+1, replicaAuth)
+	}
+	script.WriteString("exec redis-server" + auth)
+	return []string{"sh", "-c", script.String()}
+}
+
+// reserveLoopbackPorts returns n loopback ports free at the time of the call.
+// They are held together until all are chosen, so the n are distinct.
+func reserveLoopbackPorts(n int) ([]uint16, error) {
+	listeners := make([]net.Listener, 0, n)
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
+	ports := make([]uint16, 0, n)
+	for range n {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("reserve a loopback port for a redis replica: %w", err)
+		}
+		listeners = append(listeners, listener)
+		ports = append(ports, uint16(listener.Addr().(*net.TCPAddr).Port))
+	}
+	return ports, nil
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context) error {
@@ -308,6 +441,21 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 		},
 	}); err != nil {
 		return s.Wool.Wrapf(err, "redis is not ready")
+	}
+	// Every replica, not just the one behind the read endpoint: each is only
+	// ready once its link to the primary is up.
+	for i, replica := range s.replicaAddresses {
+		if err = waitForRedisPong(ctx, redisWaitOptions{
+			address:  replica,
+			password: s.redisPassword,
+			budget:   redisDockerReadinessBudget,
+			replica:  true,
+			onAttemptFailed: func(probeErr error) {
+				s.Wool.Debug("waiting for redis replica to be ready", wool.Field("replica", i+1), wool.ErrField(probeErr))
+			},
+		}); err != nil {
+			return s.Wool.Wrapf(err, "redis replica %d is not ready", i+1)
+		}
 	}
 
 	s.Wool.Debug("redis is ready!")

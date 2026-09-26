@@ -93,13 +93,14 @@ broken image stops build, vet and test from reporting at all.
 | Path | Owns |
 | --- | --- |
 | `main.go` | agent identity, `Settings`, configuration → connection string, runtime-image lock parsing |
-| `runtime.go` | Runtime contract; backend selection (docker vs nix), network mapping fan-in |
+| `runtime.go` | Runtime contract; backend selection (docker vs nix), alias routing, replicas |
 | `nixredis.go` | the Docker-free native server: nix materialization, state roots, file locks |
-| `redisprobe.go` | the readiness handshake (RESP `AUTH` + `PING`), shared by both runtimes |
+| `redisprobe.go` | the readiness handshake (RESP `AUTH` + `PING`, a replica's link), shared by both runtimes |
 | `redislog.go` | parses redis' own log prefix into `wool` records at a mapped severity |
 | `builder.go` | Builder contract: `Create`, `Deploy` (kustomize), `Audit`, `SBOM`, `Upgrade` |
-| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import (leases, invalidation notices) |
-| `cacheprovider_test.go` | the emitted `cache` group, and `cachetest` conformance over both runtimes |
+| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import (leases; notices on RESP3 client tracking, `cache/tracking.go`) |
+| `cacheprovider_test.go` | the emitted `cache` group, and `cachetest` conformance through the Runtime |
+| `runtimeredis_test.go` | `startRuntimeRedis`: HeadlessLoad → Init → Start → Destroy, docker or nix, replicas |
 | `Dockerfile`, `runtime-image.json` | the shipped runtime image and the lock that pins it |
 | `nix/flake.nix` | redis for the native runtime — the other half of runtime parity |
 | `templates/deployment` | kustomize base + environment overlay rendered by `Deploy` |
@@ -111,11 +112,16 @@ broken image stops build, vet and test from reporting at all.
   `-NOAUTH`, or a `-LOADING` do not prove the agent can run commands. The probe
   separates *retryable* (still coming up) from *terminal* (bad credentials, not a
   redis) — waiting never turns a non-RESP peer into a redis server.
-- **One redis process serves every declared TCP alias.** A read/write topology
-  declares several TCP endpoints; the runtime folds them onto one instance and
-  reports that instance's real addresses for each alias, and `Deploy` publishes
-  one Service port per alias, all targeting 6379. Do not give an alias its own
-  server or its own port.
+- **Aliases fold onto the process that serves them.** Without
+  `with-read-replicas`, one redis serves every TCP alias: the runtime reports its
+  real addresses for each, and `Deploy` targets every Service port at 6379. With
+  it, the serving (write) endpoint is the primary and every other alias the
+  replicas (`replicaof`, ready only at `master_link_status:up`); `Deploy` renders
+  both StatefulSets and routes each port by named target port. The cache group
+  always names the primary. Under docker the replicas share the primary's
+  container: deliberate and owner-accepted, because core's docker runner has no
+  container-to-container network. Changing that is a core capability, not a
+  workaround to build here.
 - **`runtime-image.json` is a lock, not documentation.** Publish the image before
   you pin its digest: the reproducibility check passes on a pin that was never
   pushed, and only the anonymous-pull check catches it. See the
@@ -125,8 +131,9 @@ broken image stops build, vet and test from reporting at all.
   them, and image SBOM evidence owes one subject per platform.
 - **This agent provides `codefly.dev/cache`** (codefly-dev/interface-cache):
   the `cache` group (`driver: redis`, the `redis` group's `connection`) and the
-  `cache/` driver. Only `TestRealRedisCache*`, the interface's conformance suite
-  over docker and nix, proves them; a driver change that has not run it is
+  `cache/` driver. Only `TestRealRedisCache*` proves them: the conformance suite
+  through this agent's Runtime (docker, nix, with and without replicas), plus
+  Valkey and a local Redis Cluster. A driver change that has not run it is
   unverified.
 - **Keep both runtimes at parity.** Moving the image without moving
   `nix/flake.lock` leaves the native runtime on a different redis.

@@ -5,7 +5,13 @@ metadata:
   namespace: {{.Namespace}}
 spec:
   selector:
+{{- if .Deployment.Parameters.Replicas }}
+    # Primary and replicas alike: each port reaches only the pods that declare
+    # its target port by name, "primary" or "replica".
+    redis.codefly.dev/set: {{.Name}}
+{{- else }}
     app: {{.Name}}
+{{- end }}
   ports:
 {{- range .Deployment.Parameters.ServicePorts }}
 {{- if .Name }}
@@ -14,7 +20,7 @@ spec:
 {{- else }}
     - port: {{ .Port }}
 {{- end }}
-      targetPort: 6379
+      targetPort: {{ .Target }}
 {{- end }}
 {{- if .Deployment.Parameters.Headless }}
   # Headless: one tcp endpoint owns 6379, so nothing needs translating and the

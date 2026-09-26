@@ -41,6 +41,30 @@ type Settings struct {
 	// releasing it. Stop otherwise ends execution, which for the native runtime
 	// means terminating the process and freeing the assigned port.
 	KeepRunning bool `yaml:"keep-running"`
+	// WithReadReplicas runs read replicas beside the primary: the serving
+	// (write) endpoint resolves to the primary, every other TCP endpoint to the
+	// replicas. Without it every alias is served by one process.
+	WithReadReplicas bool `yaml:"with-read-replicas"`
+	// ReadReplicas is how many replicas run. It defaults to 1 and is only
+	// meaningful with with-read-replicas.
+	ReadReplicas int `yaml:"read-replicas"`
+}
+
+// replicaCount is the number of read replicas the settings ask for, 0 when
+// there are none. A count without with-read-replicas is refused rather than
+// guessed at: either reading of it silently changes what the service runs.
+func (s *Settings) replicaCount() (int, error) {
+	switch {
+	case s.ReadReplicas < 0:
+		return 0, fmt.Errorf("read-replicas is %d; it must be at least 1", s.ReadReplicas)
+	case !s.WithReadReplicas && s.ReadReplicas > 0:
+		return 0, fmt.Errorf("read-replicas is %d but with-read-replicas is not set", s.ReadReplicas)
+	case !s.WithReadReplicas:
+		return 0, nil
+	case s.ReadReplicas == 0:
+		return 1, nil
+	}
+	return s.ReadReplicas, nil
 }
 
 // The managed image is the official redis Alpine image rebuilt with patched
@@ -118,6 +142,10 @@ type Service struct {
 	redisPassword string
 
 	TcpEndpoint *basev0.Endpoint
+	// ReadEndpoint is the TCP endpoint the replicas serve when the service has
+	// read replicas, and nil otherwise. Every TCP alias other than TcpEndpoint
+	// resolves to the same replicas.
+	ReadEndpoint *basev0.Endpoint
 }
 
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
@@ -138,6 +166,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 				Name: "redis", Description: "redis connection details",
 				Fields: []*agentv0.ConfigurationValueInformation{
 					{Name: "connection", Description: "connection string"},
+					{Name: readConnectionKey, Description: "connection string of the read replicas; only with with-read-replicas"},
 				},
 			},
 			{
@@ -151,12 +180,11 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	}.Build(), nil
 }
 
-// resolveServingTCPEndpoint selects the single TCP endpoint the redis agent
-// binds its runtime and deployment to. A read-replica topology declares several
-// tcp endpoints (e.g. read + write). The local runtime serves them on one
-// instance and returns the selected endpoint's actual addresses for each alias.
-// Core's FindTCPEndpoint rejects that ambiguity, so prefer the write/primary endpoint
-// when present and otherwise fall back to the first declared TCP endpoint.
+// resolveServingTCPEndpoint selects the TCP endpoint the primary serves. A
+// read/write topology declares several tcp endpoints (e.g. read + write), which
+// Core's FindTCPEndpoint rejects as ambiguous, so prefer the write endpoint when
+// present and otherwise fall back to the first declared TCP endpoint. Without
+// read replicas every other alias is served by the same process.
 func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) (*basev0.Endpoint, error) {
 	tcp := resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints)
 	switch len(tcp) {
@@ -171,6 +199,45 @@ func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint
 		}
 	}
 	return tcp[0], nil
+}
+
+// resolveReplicaTCPEndpoint selects the TCP endpoint read replicas serve: "read"
+// when declared, otherwise the first TCP endpoint that is not the serving one.
+// Replicas with no endpoint of their own would be unreachable, so that is an
+// error rather than a topology that quietly serves nothing.
+func resolveReplicaTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint, serving *basev0.Endpoint) (*basev0.Endpoint, error) {
+	var candidates []*basev0.Endpoint
+	for _, endpoint := range resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints) {
+		if endpoint.Name == serving.GetName() {
+			continue
+		}
+		if endpoint.Name == "read" {
+			return endpoint, nil
+		}
+		candidates = append(candidates, endpoint)
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("with-read-replicas needs a TCP endpoint for the replicas besides %q (declare a read endpoint)", serving.GetName())
+	}
+	return candidates[0], nil
+}
+
+// resolveTCPEndpoints binds the serving endpoint and, when the settings ask for
+// replicas, the endpoint they serve. Load runs it for the runtime and the
+// builder alike, so both render the same topology.
+func (s *Service) resolveTCPEndpoints(ctx context.Context, endpoints []*basev0.Endpoint) error {
+	serving, err := resolveServingTCPEndpoint(ctx, endpoints)
+	if err != nil {
+		return err
+	}
+	s.TcpEndpoint = serving
+	s.ReadEndpoint = nil
+	replicas, err := s.replicaCount()
+	if err != nil || replicas == 0 {
+		return err
+	}
+	s.ReadEndpoint, err = resolveReplicaTCPEndpoint(ctx, endpoints, serving)
+	return err
 }
 
 func NewService() *Service {
@@ -235,8 +302,30 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	return outputConf, nil
 }
 
-func (s *Service) restrictedConnectionConfiguration(instance *basev0.NetworkInstance) *basev0.Configuration {
-	return &basev0.Configuration{
+// readConnectionKey carries the replicas' connection in the redis group. The
+// cache group has no such key: every cache operation goes to the primary.
+const readConnectionKey = "read-connection"
+
+// addReadConnection records the replicas' connection string for readInstance in
+// the redis group of conf, which CreateConnectionConfiguration built for the
+// primary's matching access view.
+func (s *Service) addReadConnection(conf *basev0.Configuration, readInstance *basev0.NetworkInstance) {
+	value := &basev0.ConfigurationValue{Key: readConnectionKey, Secret: true}
+	if readInstance != nil {
+		value.Value = s.createConnectionString(context.Background(), readInstance.Address)
+	}
+	for _, info := range conf.GetInfos() {
+		if info.GetName() == "redis" {
+			info.ConfigurationValues = append(info.ConfigurationValues, value)
+			return
+		}
+	}
+}
+
+// restrictedConnectionConfiguration carries value-free secret references only.
+// withReplicas adds the replicas' reference beside the primary's.
+func (s *Service) restrictedConnectionConfiguration(instance *basev0.NetworkInstance, withReplicas bool) *basev0.Configuration {
+	conf := &basev0.Configuration{
 		Origin:         s.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
 		Infos: []*basev0.ConfigurationInformation{
@@ -249,6 +338,10 @@ func (s *Service) restrictedConnectionConfiguration(instance *basev0.NetworkInst
 			cacheConfiguration(""),
 		},
 	}
+	if withReplicas {
+		s.addReadConnection(conf, nil)
+	}
+	return conf
 }
 
 // cacheConfiguration is what makes service-redis a provider of

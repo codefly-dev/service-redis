@@ -70,7 +70,7 @@ func startRealRedis(t *testing.T, password string) string {
 	}
 	args = append(args, image.FullName())
 	if password != "" {
-		args = append(args, redisDockerCommand()...)
+		args = append(args, redisDockerCommand(true, 0)...)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
