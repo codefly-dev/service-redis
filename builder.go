@@ -196,6 +196,16 @@ func (s *Builder) prepareDeployment(
 	if err != nil {
 		return nil, err
 	}
+	// The server needs the password it hands consumers. Without it in the
+	// Secret, the StatefulSet ran the image's bare redis-server: open to any
+	// client, and refusing the AUTH every consumer's connection sends.
+	// REDISCLI_AUTH lets the probes' redis-cli ping authenticate.
+	if s.redisPassword != "" {
+		deployment.AddSecrets(
+			resources.Env("REDIS_PASSWORD", s.redisPassword),
+			resources.Env("REDISCLI_AUTH", s.redisPassword),
+		)
+	}
 	return configuration, nil
 }
 

@@ -44,6 +44,13 @@ spec:
             - name: redis
               containerPort: 6379
 {{- if not .Restricted }}
+          # The builder puts REDIS_PASSWORD in this Secret whenever a password is
+          # configured; start the server with it. With no password configured the
+          # server is open by configuration, as it is locally.
+          command:
+            - sh
+            - -c
+            - 'if [ -n "$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$REDIS_PASSWORD"; else exec redis-server; fi'
           envFrom:
             - secretRef:
                 name: {{.Name}}-secret
