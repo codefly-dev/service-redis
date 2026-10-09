@@ -119,9 +119,14 @@ func TestRuntimeImagePlatformsAreDerivedFromTheLock(t *testing.T) {
 	}
 }
 
-func TestManagedImageIsPatchedDockerHubReference(t *testing.T) {
-	if image.Name != "docker.io/codeflydev/redis" {
-		t.Fatalf("image.Name = %q, want docker.io/codeflydev/redis", image.Name)
+// The managed image is OURS -- the patched build this repository publishes,
+// pinned by digest -- never upstream redis by name. It lives on ghcr.io, the
+// fleet's canonical registry for authored images, published by
+// .github/workflows/runtime-image.yml; the Docker Hub name it used to carry
+// had no publisher at all.
+func TestManagedImageIsPatchedCanonicalReference(t *testing.T) {
+	if image.Name != "ghcr.io/codefly-dev/service-redis-runtime" {
+		t.Fatalf("image.Name = %q, want ghcr.io/codefly-dev/service-redis-runtime", image.Name)
 	}
 	if !strings.HasPrefix(image.Digest, "sha256:") {
 		t.Fatalf("image.Digest = %q, want sha256-pinned reference", image.Digest)
@@ -138,8 +143,8 @@ func TestRuntimeDockerfilePinsPatchedOpenSSL(t *testing.T) {
 		"# syntax=docker/dockerfile:1.7@sha256:",
 		"ARG REDIS_IMAGE=redis:8.8.0-alpine@sha256:",
 		"ARG SOURCE_DATE_EPOCH=0",
-		"libcrypto3=3.5.8-r0",
-		"libssl3=3.5.8-r0",
+		"libcrypto3=3.5.9-r0",
+		"libssl3=3.5.9-r0",
 		"setpriv=2.41.6-r1",
 	} {
 		if !strings.Contains(dockerfile, want) {

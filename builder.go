@@ -156,7 +156,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 				return prepareErr
 			}
 			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
-			if services.IsRestrictedOutputProfile(deployment.Profile) {
+			if restrictedOutput(deployment.Profile) {
 				restrictedConfiguration = configuration
 				return nil
 			}
@@ -207,7 +207,7 @@ func (s *Builder) prepareDeployment(
 	// straight to pod IPs and dial the port themselves, so port cannot differ
 	// from targetPort. Aliases are exactly that fan-in, so they need a ClusterIP.
 	parameters.Headless = len(parameters.ServicePorts) == 1
-	if services.IsRestrictedOutputProfile(deployment.Profile) {
+	if restrictedOutput(deployment.Profile) {
 		passwordKey := resources.ServiceSecretConfigurationKeyFromUnique(s.Unique(), "redis", "REDIS_PASSWORD")
 		passwordReference := deployment.Kubernetes.GetSecretReferences()[passwordKey]
 		if passwordReference == nil {
@@ -314,13 +314,32 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	return s.Builder.CreateResponse(ctx, s.Settings)
 }
 
+// restrictedOutput reports whether the deployment selects the restricted,
+// portable output contract. It replaces services.IsRestrictedOutputProfile,
+// which core retired in favour of a parsed profile: an unknown or unselected
+// profile is now an ERROR rather than silently "not restricted", and reading it
+// as unrestricted is the unsafe direction -- it would hand a restricted render
+// the secrets it exists to refuse. A profile this build cannot name is treated
+// as restricted for that reason.
+func restrictedOutput(profile builderv0.KubernetesOutputProfile) bool {
+	parsed, err := services.ParseOutputProfile(profile)
+	if err != nil {
+		return true
+	}
+	return parsed.Restricted()
+}
+
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	tcp, err := resources.LoadTCPAPI(ctx)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot load tcp api")
 	}
 	endpoint := s.Base.BaseEndpoint(standards.TCP)
-	endpoint.Visibility = resources.VisibilityExternal
+	// PRIVATE, not the retired `external`. Reach is visibility, addressing is
+	// exposure and where it lives is location; `external` is no longer a
+	// visibility, and on a cache it was a false claim either way -- the render
+	// allocates this service its own in-cluster address.
+	endpoint.Visibility = resources.VisibilityPrivate
 	s.TcpEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToTCPAPI(tcp))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create tcp endpoint")

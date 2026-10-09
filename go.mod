@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-redis
 go 1.27.0
 
 require (
-	github.com/codefly-dev/core v0.5.10
+	github.com/codefly-dev/core v0.16.0
 	github.com/codefly-dev/gortk v0.2.0
 	github.com/codefly-dev/interface-cache/go/cache v0.2.1
 	github.com/codefly-dev/service-redis/cache v0.2.0
@@ -115,5 +115,3 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.21.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace github.com/codefly-dev/service-redis/cache => ./cache
