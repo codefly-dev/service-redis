@@ -1,0 +1,62 @@
+# Publishes the runtime image this agent pins in runtime-image.json, to the
+# fleet's canonical registry (ghcr.io -- infra-base docs/container-registry.md).
+#
+# The build is the SAME one ci.yml's "Verify runtime image digest is
+# reproducible" runs -- no cache, SOURCE_DATE_EPOCH=0, the lock's platforms,
+# no provenance or SBOM attestation, rewritten timestamps -- so the digest this
+# publishes is the digest the lock already names. The last step proves it by
+# pulling the lock's name@digest anonymously; a mismatch fails the publish
+# rather than leaving a tag nobody pins.
+name: Runtime image
+on:
+  push:
+    tags:
+      - 'runtime-v*'
+permissions:
+  contents: read
+  packages: write
+env:
+  IMAGE: ghcr.io/codefly-dev/service-redis-runtime
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: The lock names this registry
+        run: |
+          set -euo pipefail
+          name=$(jq -er '.name' runtime-image.json)
+          test "$name" = "$IMAGE" || { echo "runtime-image.json names $name, this workflow publishes $IMAGE" >&2; exit 1; }
+      - name: Build reproducibly and publish
+        run: |
+          set -euo pipefail
+          platforms=$(jq -er '.platforms | join(",")' runtime-image.json)
+          tag=$(jq -er '.tag' runtime-image.json)
+          docker buildx build --no-cache \
+            --build-arg SOURCE_DATE_EPOCH=0 \
+            --platform "$platforms" \
+            --provenance=false --sbom=false \
+            --output "type=image,name=${IMAGE}:${tag},push=true,rewrite-timestamp=true" \
+            --metadata-file /tmp/runtime-meta.json \
+            .
+          built=$(jq -er '."containerimage.digest"' /tmp/runtime-meta.json)
+          expected=$(jq -er '.digest' runtime-image.json)
+          echo "published ${IMAGE}:${tag}@${built}"
+          test "$built" = "$expected" || { echo "published digest $built is not the lock's $expected: re-lock before tagging" >&2; exit 1; }
+      - name: Verify the lock's image is anonymously pullable
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          ref=$(jq -er '.name + "@" + .digest' runtime-image.json)
+          docker buildx imagetools inspect "$ref"
+          docker run --rm "$ref" redis-server --version | grep -F 'v=8.8.0'

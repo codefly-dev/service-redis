@@ -1,5 +1,5 @@
 {
-  "name": "docker.io/codeflydev/redis",
+  "name": "ghcr.io/codefly-dev/service-redis-runtime",
   "tag": "redis-8.8.0-openssl-3.5.9-r0-setpriv-2.41.6-r1-alpine3.23",
   "digest": "sha256:7a5ea64d5bb6799f7a2dacf619ff9ad617937c22417795d2c9e3b5a399866a4d",
   "platforms": [
