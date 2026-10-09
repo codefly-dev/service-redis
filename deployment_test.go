@@ -337,7 +337,14 @@ func TestExternalTCPEndpointIsNotPublishedByTheService(t *testing.T) {
 	builder, _ := newDeploymentTestBuilder(t)
 	write := deploymentAliasMapping(builder, "write", 16002)
 	read := deploymentAliasMapping(builder, "read", 16001)
-	read.Endpoint.Visibility = resources.VisibilityExternal
+	// `external` is a LOCATION now, not a visibility: reach is visibility,
+	// addressing is exposure, and where it lives is location. This test is
+	// about where the endpoint lives -- outside the cluster, reached by DNS --
+	// so it sets the location, and no exposure, since an external endpoint
+	// refuses `exposure: public`. Rewriting it as a public VISIBILITY would
+	// invert the very thing it asserts: that the Service does not publish it.
+	read.Endpoint.Location = resources.LocationExternal
+	read.Endpoint.Exposure = resources.ExposureNone
 	external := resources.NewNetworkInstance("redis.example.com", 6379)
 	external.Access = resources.NewPublicNetworkAccess()
 	read.Instances = []*basev0.NetworkInstance{external}
