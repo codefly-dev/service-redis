@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/codefly-dev/core/agents"
+	"github.com/codefly-dev/core/agents/contract"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -155,7 +156,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return services.Advertisement{
+	advertisement := services.Advertisement{
 		Backends: runnersbase.BackendSupport{
 			Nix:    true,
 			Docker: true,
@@ -177,7 +178,13 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 				},
 			},
 		},
-	}.Build(), nil
+	}.Build()
+	// The deployment path is core's DeployKustomize, which judges dependency
+	// edges with the request's composition provenance on this core; the host
+	// requires the live advertisement, not the linked core version.
+	advertisement.Contract = contract.Current()
+	advertisement.Contract.Capabilities = append(advertisement.Contract.Capabilities, contract.DeploymentCompositionProvenance)
+	return advertisement, nil
 }
 
 // resolveServingTCPEndpoint selects the TCP endpoint the primary serves. A
