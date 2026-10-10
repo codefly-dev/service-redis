@@ -286,16 +286,18 @@ func TestRealRedisEphemeralReplicasAuthenticate(t *testing.T) {
 	}
 	primaryAddress, replicaAddress := address(primary), address(replica)
 
-	// The replica is ready only by the rendered probe, run as rendered: it
-	// authenticates through REDISCLI_AUTH and requires the link to be up.
-	probe := replicaSet.Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command
+	// The rendered probes are TCP probes (a cell's admission refuses an exec
+	// one), so readiness no longer gates on the link: the replica does. It runs
+	// with replica-serve-stale-data no, so an authenticated read answers
+	// MASTERDOWN until the link to the primary is up, and then answers.
 	for deadline := time.Now().Add(time.Minute); ; time.Sleep(500 * time.Millisecond) {
-		if exec.CommandContext(ctx, "docker", append([]string{"exec", replica}, probe...)...).Run() == nil {
+		out, err := exec.CommandContext(ctx, "docker", "exec", replica, "redis-cli", "get", "k").CombinedOutput()
+		if err == nil && !strings.Contains(string(out), "MASTERDOWN") && !strings.Contains(string(out), "NOAUTH") {
 			break
 		}
 		if time.Now().After(deadline) {
-			out, _ := exec.Command("docker", "logs", replica).CombinedOutput()
-			t.Fatalf("the rendered replica never passed its rendered readiness probe %q\n%s", probe, out)
+			logs, _ := exec.Command("docker", "logs", replica).CombinedOutput()
+			t.Fatalf("the rendered replica never served an authenticated read: %s\n%s", out, logs)
 		}
 	}
 	if err := waitForRedisPong(ctx, redisWaitOptions{address: replicaAddress, password: password, replica: true, budget: redisDockerReadinessBudget}); err != nil {

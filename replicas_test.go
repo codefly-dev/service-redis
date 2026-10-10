@@ -301,8 +301,13 @@ func TestDeploymentRendersPrimaryAndReplicas(t *testing.T) {
 			t.Errorf("replica command %q does not contain %q", command, want)
 		}
 	}
-	if probe := strings.Join(replica.ReadinessProbe.Exec.Command, " "); !strings.Contains(probe, "master_link_status:up") {
-		t.Errorf("replica readiness = %q, want it to require the link to the primary", probe)
+	// No exec probe (a cell's admission refuses one): the replica itself
+	// refuses to serve until its link to the primary is up.
+	if !strings.Contains(command, "--replica-serve-stale-data no") {
+		t.Errorf("replica command %q does not refuse stale reads before the link is up", command)
+	}
+	if len(replica.ReadinessProbe.Exec.Command) != 0 {
+		t.Errorf("replica readiness execs %q; a cell's admission refuses an exec probe", strings.Join(replica.ReadinessProbe.Exec.Command, " "))
 	}
 	for _, set := range sets {
 		if set.Spec.Template.Metadata.Labels["redis.codefly.dev/set"] != "redis" {
