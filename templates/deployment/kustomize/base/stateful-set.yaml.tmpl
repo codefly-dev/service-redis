@@ -91,21 +91,23 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          # redis-cli ping returns PONG when the server is accepting
-          # connections. Cheap to run as a probe.
+          # TCP probes on the redis port. A cell's execution admission refuses
+          # any container with an exec probe or hook: the image digest says
+          # which bytes run, and an exec probe says what they do inside a pod
+          # that already holds the workload's identity.
           startupProbe:
-            exec:
-              command: ["redis-cli", "ping"]
+            tcpSocket:
+              port: 6379
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:
-            exec:
-              command: ["redis-cli", "ping"]
+            tcpSocket:
+              port: 6379
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
-            exec:
-              command: ["redis-cli", "ping"]
+            tcpSocket:
+              port: 6379
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
@@ -183,7 +185,7 @@ spec:
           command:
             - sh
             - -c
-            - 'if [ -n "$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" --replicaof {{ .Host }} {{ .Port }}; else exec redis-server --replicaof {{ .Host }} {{ .Port }}; fi'
+            - 'if [ -n "$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" --replica-serve-stale-data no --replicaof {{ .Host }} {{ .Port }}; else exec redis-server --replica-serve-stale-data no --replicaof {{ .Host }} {{ .Port }}; fi'
           envFrom:
             - secretRef:
                 name: {{$.Name}}-secret
@@ -192,7 +194,7 @@ spec:
           command:
             - sh
             - -c
-            - 'test -n "$REDIS_PASSWORD" && exec redis-server --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" --replicaof {{ $.Deployment.Parameters.ReplicaOf.Host }} {{ $.Deployment.Parameters.ReplicaOf.Port }}'
+            - 'test -n "$REDIS_PASSWORD" && exec redis-server --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" --replica-serve-stale-data no --replicaof {{ $.Deployment.Parameters.ReplicaOf.Host }} {{ $.Deployment.Parameters.ReplicaOf.Port }}'
           env:
             - name: REDIS_PASSWORD
               valueFrom:
@@ -211,7 +213,7 @@ spec:
           command:
             - sh
             - -c
-            - 'exec redis-server --replicaof {{ .Host }} {{ .Port }}'
+            - 'exec redis-server --replica-serve-stale-data no --replicaof {{ .Host }} {{ .Port }}'
 {{- end }}
           resources:
             requests:
@@ -220,21 +222,25 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          # TCP probes, for the same admission reason as the primary's. A
+          # replica accepts connections long before it holds the primary's
+          # data, so the probe no longer gates on the link: the server does.
+          # Every command above starts it with `replica-serve-stale-data no`,
+          # so until its link to the primary is up it answers each data
+          # command with MASTERDOWN instead of serving an empty or stale copy.
           startupProbe:
-            exec:
-              command: ["redis-cli", "ping"]
+            tcpSocket:
+              port: 6379
             periodSeconds: 2
             failureThreshold: 30
-          # A replica answers PING long before it holds the primary's data: it
-          # is ready only once its link to the primary is up.
           readinessProbe:
-            exec:
-              command: ["sh", "-c", "redis-cli info replication | grep -q '^master_link_status:up'"]
+            tcpSocket:
+              port: 6379
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
-            exec:
-              command: ["redis-cli", "ping"]
+            tcpSocket:
+              port: 6379
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
