@@ -18,7 +18,7 @@ jobs:
     needs: image
     permissions:
       contents: read
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@v0.19.4
 
   # Socket fixtures pin the readiness protocol; only a real server proves redis
   # agrees with it. This job runs both backends with real credentials — the

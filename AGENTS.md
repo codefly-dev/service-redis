@@ -60,7 +60,7 @@ was supposed to resolve, and the result still boots and serves.
 ## Build and test
 
 Derived from `.github/workflows/ci.yml` and the shared
-`codefly-dev/core/.github/workflows/go-service-ci.yml@main` it calls. Go comes
+`codefly-dev/core/.github/workflows/go-service-ci.yml@v0.19.4` it calls. Go comes
 from `go.mod`; CI disables setup-go's cache because it corrupts the downloaded
 toolchain module on restore.
 
