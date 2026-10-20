@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/codefly-dev/core/wool"
 	"github.com/codefly-dev/gortk"
@@ -37,9 +38,15 @@ func mustCompileLog(s gortk.LogSpec) *gortk.LogParser {
 
 // redisLogWriter parses the redis log stream and re-emits each line through Wool
 // at a severity-mapped level. It implements io.Writer so it can replace the raw
-// logger handed to the runner.
+// logger handed to the runner. One writer serves every stream a runtime
+// produces: the native runtime hands it to the primary and to each replica
+// process, and core forwards each process's stdout and stderr from a goroutine
+// of its own, one complete line per Write. So Write is safe for concurrent
+// use; without that, a line from one process is appended while another's is
+// being cut out of the buffer, and the reslice panics.
 type redisLogWriter struct {
 	w   *wool.Wool
+	mu  sync.Mutex
 	buf []byte
 }
 
@@ -52,6 +59,8 @@ var _ io.Writer = (*redisLogWriter)(nil)
 // Write buffers incoming bytes and flushes complete (newline-terminated) lines;
 // a partial trailing line is held until its newline arrives.
 func (p *redisLogWriter) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.buf = append(p.buf, b...)
 	for {
 		i := bytes.IndexByte(p.buf, '\n')

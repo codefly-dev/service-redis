@@ -135,9 +135,16 @@ func testRuntimeCache(t *testing.T, backend redisBackend, replicas int) {
 	}
 }
 
+// redisSuite is the conformance harness plus the client a test writes around
+// the driver with: the primary, or the cluster.
+type redisSuite struct {
+	cachetest.Harness
+	writer goredis.Cmdable
+}
+
 // connectionHarness gives each namespace its own client on connection, as
 // separate processes would have.
-func connectionHarness(t *testing.T, connection string) cachetest.Harness {
+func connectionHarness(t *testing.T, connection string) redisSuite {
 	server := redisClient(t, connection)
 	return redisHarness(func(t *testing.T, namespace string) *rediscache.Layer {
 		return rediscache.New(redisClient(t, connection), rediscache.WithPrefix(namespace))
@@ -152,8 +159,8 @@ func redisHarness(
 	newLayer func(t *testing.T, namespace string) *rediscache.Layer,
 	writer goredis.Cmdable,
 	tracking func(t *testing.T) []*goredis.Client,
-) cachetest.Harness {
-	return cachetest.Harness{
+) redisSuite {
+	return redisSuite{writer: writer, Harness: cachetest.Harness{
 		New: func(t *testing.T, namespace string) cacheiface.Layer { return newLayer(t, namespace) },
 		// A plain SET of the driver's value key, as another program would.
 		ExternalWrite: func(t *testing.T, namespace, key string) {
@@ -169,7 +176,7 @@ func redisHarness(
 				t.Fatalf("no tracking connection %q to interrupt", name)
 			}
 		},
-	}
+	}}
 }
 
 // killTrackingConnections CLIENT KILLs every connection named name on servers
@@ -203,10 +210,13 @@ func killTrackingConnections(t *testing.T, servers []*goredis.Client, name strin
 }
 
 // runCacheSuite is the interface's conformance, plus what a stack over the
-// layer owes a consumer: a write elsewhere evicts its in-process copy.
-func runCacheSuite(t *testing.T, harness cachetest.Harness) {
+// layer owes a consumer: a write elsewhere evicts its in-process copy, and an
+// entry an older driver left is a miss it refills (cache_format_test.go).
+func runCacheSuite(t *testing.T, s redisSuite) {
+	harness := s.Harness
 	t.Run("Conformance", func(t *testing.T) { cachetest.Run(t, harness) })
 	t.Run("FillOnceAcrossProcesses", func(t *testing.T) { cachetest.RunStack(t, harness) })
+	t.Run("OldFormatEntriesAreMissesThatRefill", func(t *testing.T) { runOldFormatEntries(t, s) })
 
 	t.Run("RemoteWriteEvictsMemory", func(t *testing.T) {
 		ctx := context.Background()
