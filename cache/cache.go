@@ -1,10 +1,15 @@
 // Package cache is service-redis's implementation of the codefly.dev/cache
 // interface (github.com/codefly-dev/interface-cache): a cache layer for a
-// server speaking the Redis protocol. It is a Leaser, so a miss reaches the
-// origin once across every process sharing the server, and a Notifier on
-// Redis client tracking (tracking.go), so in-process layers above it drop a key
-// that changed, whoever changed it. Tracking lives in a connection, so it is
-// also a Resyncer: when that connection drops, the layers above are flushed.
+// server speaking the Redis protocol. It declares (Capabilities) what it is: a
+// Leaser, so a miss reaches the origin once across every process sharing the
+// server; a Notifier on Redis client tracking (tracking.go), so in-process
+// layers above it drop a key that changed, whoever changed it, within
+// NoticeBound; a Resyncer, because tracking lives in a connection and a
+// dropped one is a gap in the notices; and a Fencer, so a fill never replaces
+// a newer version of a value. It declares no Flushes and no ByteBudget:
+// emptying a prefix would take a scan of the keyspace, which no mode needs of
+// the deepest tier, and maxmemory and the eviction policy are the server's
+// configuration, which the driver neither sets nor reads.
 //
 // Importing it registers the "redis" driver with cache.Open. The connection is
 // the redis:// URL service-redis emits in its "cache" configuration group.
@@ -22,9 +27,12 @@
 // some other program, expiry and eviction, and this layer's own writes, which
 // the interface allows. An echo of a stack's own write can evict the copy that
 // write just stored in the tiers above; that costs one extra read, never a
-// stale value. Tracking lives in a connection, so a dropped connection or a
-// flush is reported through SubscribeResync, and the stack flushes the tiers
-// above. The tracking connection is named TrackingClientName in CLIENT LIST.
+// stale value. Tracking lives in a connection, so a dropped connection is a
+// gap, reported through SubscribeGaps as lost once it is detected and resynced
+// once tracking is back; a server flush (FLUSHDB, FLUSHALL) invalidates every
+// key at once, which no notice names, and is reported as a gap of no length,
+// lost and resynced back to back. The stack flushes the tiers above on each.
+// The tracking connection is named TrackingClientName in CLIENT LIST.
 //
 // A Delete of a key the server does not hold is announced too: a process can
 // hold a copy that the shared layer does not (one filled while this tier was
@@ -35,10 +43,22 @@
 // Reads the ClusterClient routes to cluster replicas are not covered by the
 // ordering WithReplica gives.
 //
+// # Entries
+//
+// An entry is stored under one key as a header of fixed layout (format,
+// flags, Sequence, Confirmed, Expires), then the version and the value. A
+// value Get cannot decode as one is a miss, not an error: an entry in the
+// previous format, left by cache/v0.2.0 or earlier, or bytes another program
+// stored under the key. A process on cache/v0.2.0 reads the current format as
+// an error, so a keyspace is not shared across the upgrade; the interface
+// already keys a layer differently per version, so a consumer moving to
+// go/cache v0.4.0 reads none of its old copies anyway.
+//
 // # What has been run
 //
 // service-redis's TestRealRedisCache* runs the interface's conformance suite,
-// including the external-writer and resync cases, against:
+// cachetest.Run and RunStack with its Modes, Pitfalls and Simulation,
+// including the external-writer, fenced-fill and resync cases, against:
 //
 //   - Redis as service-redis's own Runtime runs it, the pinned image under
 //     Docker and the nix-provisioned server, single-process and as a primary
@@ -112,9 +132,27 @@ type Layer struct {
 }
 
 var (
+	_ cache.Declarer = (*Layer)(nil)
 	_ cache.Leaser   = (*Layer)(nil)
 	_ cache.Notifier = (*Layer)(nil)
+	_ cache.Resyncer = (*Layer)(nil)
+	_ cache.Fencer   = (*Layer)(nil)
 )
+
+// Capabilities implements cache.Declarer: what a stack may ask of this layer.
+// Leases, Notifies within NoticeBound, Resyncs and Fences are backed by
+// Acquire and Fill, tracking.go, SubscribeGaps and SetFenced, and the
+// conformance suite holds each to its contract. Flushes and ByteBudget are
+// not declared: see the package documentation.
+func (l *Layer) Capabilities() cache.Capabilities {
+	return cache.Capabilities{
+		Leases:      true,
+		Notifies:    true,
+		NoticeBound: NoticeBound,
+		Resyncs:     true,
+		Fences:      true,
+	}
+}
 
 // replicaWait bounds how long a write through a WithReplica layer waits for the
 // replicas to have it.
@@ -233,6 +271,47 @@ func (l *Layer) Set(ctx context.Context, key string, e cache.Entry, ttl time.Dur
 		encode(e), milliseconds(ttl)).Err()
 }
 
+// fencedScript is setScript unless the key holds an entry of a greater
+// sequence. The sequence sits at a fixed offset of the entry header, and the
+// script compares the held one to the offered one as big-endian byte strings,
+// byte by byte: Lua's string order follows the server's locale, and its
+// numbers are doubles, which do not hold a sequence above 2^53. A held value
+// that is not an entry of this format carries no sequence and is replaced, as
+// Get reads it as a miss.
+var fencedScript = goredis.NewScript(fmt.Sprintf(`
+local held = redis.call('GET', KEYS[1])
+if held and #held >= %[1]d and string.byte(held, 1) == %[2]d then
+  for i = %[3]d, %[4]d do
+    local h, n = string.byte(held, i), string.byte(ARGV[1], i)
+    if h ~= n then
+      if h > n then return 0 end
+      break
+    end
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('DEL', KEYS[2])
+return 1`, headerLen, formatV2, sequenceOffset+1, sequenceOffset+8))
+
+// SetFenced implements cache.Fencer: it stores e as Set does, unless key holds
+// an entry whose Sequence is greater than e.Sequence, and then stores nothing
+// and returns cache.ErrFenced. What it stores revokes any fill lease on key.
+func (l *Layer) SetFenced(ctx context.Context, key string, e cache.Entry, ttl time.Duration) error {
+	if ttl <= 0 {
+		return l.Delete(ctx, key)
+	}
+	stored, err := l.write(ctx, fencedScript,
+		[]string{l.valueKey(key), l.leaseKey(key)},
+		encode(e), milliseconds(ttl)).Int()
+	if err != nil {
+		return err
+	}
+	if stored == 0 {
+		return cache.ErrFenced
+	}
+	return nil
+}
+
 // deleteScript removes a value and its fill lease. Tracking only reports keys
 // that actually change, and deleting a value the server does not hold changes
 // nothing, yet a process can still hold a copy of it above this layer (one
@@ -299,49 +378,90 @@ func (l *Layer) Release(ctx context.Context, lease cache.Lease) error {
 	return releaseScript.Run(ctx, l.client, []string{l.leaseKey(lease.Key)}, lease.Token).Err()
 }
 
-// Entries are stored as: format byte, flags byte, FreshUntil as Unix
-// nanoseconds (0 = none), the version length as a uvarint, the version, then
-// the value bytes.
+// An entry is stored as a header of fixed layout, then the version and the
+// value:
+//
+//	byte 0        formatV2
+//	byte 1        flags: flagMissing
+//	bytes 2..9    Sequence, big-endian
+//	bytes 10..17  Confirmed, Unix nanoseconds; 0 for the zero time
+//	bytes 18..25  Expires, Unix nanoseconds; 0 for the zero time
+//	bytes 26..    the version length as a uvarint, the version, the value
+//
+// The sequence sits at a fixed offset so that fencedScript can read it.
 const (
-	formatV1    = 1
-	flagMissing = 1 << 0
+	// formatV1 was the format of cache/v0.2.0 and before: flags, then the
+	// stack's freshness stamp in place of the sequence and the two times. The
+	// stack no longer has such a stamp, so there is nothing to convert it to;
+	// decode reads it as a miss.
+	formatV1        = 1
+	formatV2        = 2
+	flagMissing     = 1 << 0
+	sequenceOffset  = 2
+	confirmedOffset = 10
+	expiresOffset   = 18
+	headerLen       = 26
 )
 
 func encode(e cache.Entry) []byte {
-	buf := make([]byte, 0, 2+8+binary.MaxVarintLen64+len(e.Version)+len(e.Value))
+	buf := make([]byte, 0, headerLen+binary.MaxVarintLen64+len(e.Version)+len(e.Value))
 	var flags byte
 	if e.Missing {
 		flags |= flagMissing
 	}
-	buf = append(buf, formatV1, flags)
-	var fresh int64
-	if !e.FreshUntil.IsZero() {
-		fresh = e.FreshUntil.UnixNano()
-	}
-	buf = binary.BigEndian.AppendUint64(buf, uint64(fresh))
+	buf = append(buf, formatV2, flags)
+	buf = binary.BigEndian.AppendUint64(buf, e.Sequence)
+	buf = binary.BigEndian.AppendUint64(buf, uint64(unixNano(e.Confirmed)))
+	buf = binary.BigEndian.AppendUint64(buf, uint64(unixNano(e.Expires)))
 	buf = binary.AppendUvarint(buf, uint64(len(e.Version)))
 	buf = append(buf, e.Version...)
 	return append(buf, e.Value...)
 }
 
+// decode returns the entry raw holds, or cache.ErrMiss for bytes this driver
+// did not write: a formatV1 entry left by cache/v0.2.0 or earlier, a value
+// another program stored under the key, or a truncated one. A miss and not an
+// error, because the stack counts a Get error as the tier failing — a few in
+// a row open its breaker and the tier is skipped for a cooldown — so a
+// keyspace of entries left by the previous driver would read as a failing
+// server for as long as they were reached. A miss is refilled from below, and
+// the fill overwrites the old entry.
 func decode(raw []byte) (cache.Entry, error) {
-	if len(raw) < 10 || raw[0] != formatV1 {
-		return cache.Entry{}, fmt.Errorf("redis cache: entry in an unknown format (%d bytes)", len(raw))
+	if len(raw) <= headerLen || raw[0] != formatV2 {
+		return cache.Entry{}, cache.ErrMiss
 	}
-	e := cache.Entry{Missing: raw[1]&flagMissing != 0}
-	if fresh := int64(binary.BigEndian.Uint64(raw[2:10])); fresh != 0 {
-		e.FreshUntil = time.Unix(0, fresh)
+	e := cache.Entry{
+		Missing:   raw[1]&flagMissing != 0,
+		Sequence:  binary.BigEndian.Uint64(raw[sequenceOffset:]),
+		Confirmed: timeOf(int64(binary.BigEndian.Uint64(raw[confirmedOffset:]))),
+		Expires:   timeOf(int64(binary.BigEndian.Uint64(raw[expiresOffset:]))),
 	}
-	n, size := binary.Uvarint(raw[10:])
-	if size <= 0 || uint64(len(raw)-10-size) < n {
-		return cache.Entry{}, errors.New("redis cache: truncated entry")
+	n, size := binary.Uvarint(raw[headerLen:])
+	if size <= 0 || uint64(len(raw)-headerLen-size) < n {
+		return cache.Entry{}, cache.ErrMiss
 	}
-	rest := raw[10+size:]
+	rest := raw[headerLen+size:]
 	e.Version = string(rest[:n])
 	if !e.Missing {
 		e.Value = append([]byte{}, rest[n:]...)
 	}
 	return e, nil
+}
+
+// unixNano is t as Unix nanoseconds, and 0 for the zero time; timeOf is its
+// inverse.
+func unixNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
+
+func timeOf(ns int64) time.Time {
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 func milliseconds(d time.Duration) int64 {

@@ -114,7 +114,7 @@ broken image stops build, vet and test from reporting at all.
 | `redisprobe.go` | the readiness handshake (RESP `AUTH` + `PING`, a replica's link), shared by both runtimes |
 | `redislog.go` | parses redis' own log prefix into `wool` records at a mapped severity |
 | `builder.go` | Builder contract: `Create`, `Deploy` (kustomize), `Audit`, `SBOM`, `Upgrade` |
-| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import (leases; notices on RESP3 client tracking, `cache/tracking.go`) |
+| `cache/` | own Go module: the `codefly.dev/cache` driver consumers import — its declared capabilities, the versioned entry format and fenced fills (`cache/cache.go`), notices and gaps on RESP3 client tracking (`cache/tracking.go`); `cache/cache_test.go` pins the format |
 | `cacheprovider_test.go` | the emitted `cache` group, and `cachetest` conformance through the Runtime |
 | `runtimeredis_test.go` | `startRuntimeRedis`: HeadlessLoad → Init → Start → Destroy, docker or nix, replicas |
 | `Dockerfile`, `runtime-image.json` | the shipped runtime image and the lock that pins it |
@@ -150,7 +150,12 @@ broken image stops build, vet and test from reporting at all.
   `cache/` driver. Only `TestRealRedisCache*` proves them: the conformance suite
   through this agent's Runtime (docker, nix, with and without replicas), plus
   Valkey and a local Redis Cluster. A driver change that has not run it is
-  unverified.
+  unverified. The root module requires the *published* driver, so run it on
+  the working tree with an untracked `go.work` (`go work init . ./cache`), and
+  land a driver change in two steps: the driver PR, then — once its `cache/`
+  tag is cut on `main` — the root bump that puts CI's suite on it. Anything
+  `Get` cannot decode as an entry (an older format, another program's bytes)
+  is a miss, never an error: an error counts against the tier's breaker.
 - **Keep both runtimes at parity.** Moving the image without moving
   `nix/flake.lock` leaves the native runtime on a different redis.
 - **Do not mock the server.** The socket fixtures in `redisprobe_test.go` pin the
