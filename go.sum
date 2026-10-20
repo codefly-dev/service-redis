@@ -46,10 +46,10 @@ github.com/codefly-dev/core v0.19.4 h1:vUvaFrWkB8B3ksQY/qlgBTVj3jMNhdEpJca8aofaa
 github.com/codefly-dev/core v0.19.4/go.mod h1:0uX/7lTBVaGV0RI2Mb3mpEr/PPdx/jZqXHym/U8FVDI=
 github.com/codefly-dev/gortk v0.2.0 h1:7bOlS5valYz2zil+fZctQNcPCYBcPj86abcw9N8h1hQ=
 github.com/codefly-dev/gortk v0.2.0/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
-github.com/codefly-dev/interface-cache/go/cache v0.2.1 h1:cKBjuZIUji8VCt9o0grOxfB0+NPCskUvRH6A/6MKx1g=
-github.com/codefly-dev/interface-cache/go/cache v0.2.1/go.mod h1:OQDNwz4rpEGfq7VC/FjvmQGlo9H8gH8fIDcZhKIe8iQ=
-github.com/codefly-dev/service-redis/cache v0.2.0 h1:MKeyXFTIiZMnz5bdndb6YTsahws8DjmLTldtz/nH6EQ=
-github.com/codefly-dev/service-redis/cache v0.2.0/go.mod h1:bP1kDx4E6UWWIHNkzekfj2NbhSPPDdfRHAdfLC24fCA=
+github.com/codefly-dev/interface-cache/go/cache v0.4.1 h1:S7a20cVs3ilW8/HSpzmsyfJx/GJHgJ1xW9Dm9MYXYPI=
+github.com/codefly-dev/interface-cache/go/cache v0.4.1/go.mod h1:ki57cBwXnpFLx1uO29KiDY06lzyG/gXXBkqgi5ZNKWQ=
+github.com/codefly-dev/service-redis/cache v0.3.0 h1:F0mb7T1xHJBJDgEmI3kPriyb2EmPxKgtmOxSIUylX7s=
+github.com/codefly-dev/service-redis/cache v0.3.0/go.mod h1:cs9MIjYuIQpjqjaq1Os/JA/z7kLy093BTUDz4yjs4BE=
 github.com/containerd/errdefs v1.0.0 h1:tg5yIfIlQIrxYtu9ajqY42W3lpS19XqdxRQeEwYG8PI=
 github.com/containerd/errdefs v1.0.0/go.mod h1:+YBYIdtsnF4Iw6nWZhJcqGSg/dwvV7tyJ/kCkyJ2k+M=
 github.com/containerd/errdefs/pkg v0.3.0 h1:9IKJ06FvyNlexW690DXuQNx2KA2cUJXx151Xdx3ZPPE=
