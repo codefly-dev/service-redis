@@ -112,7 +112,7 @@ broken image stops build, vet and test from reporting at all.
 | `runtime.go` | Runtime contract; backend selection (docker vs nix), alias routing, replicas |
 | `nixredis.go` | the Docker-free native server: nix materialization, state roots, file locks |
 | `redisprobe.go` | the readiness handshake (RESP `AUTH` + `PING`, a replica's link), shared by both runtimes |
-| `redislog.go` | parses redis' own log prefix into `wool` records at a mapped severity |
+| `redislog.go` | parses redis' own log prefix into `wool` records at a mapped severity; one writer serves every process a runtime starts, so `Write` is locked |
 | `builder.go` | Builder contract: `Create`, `Deploy` (kustomize), `Audit`, `SBOM`, `Upgrade` |
 | `cache/` | own Go module: the `codefly.dev/cache` driver consumers import — its declared capabilities, the versioned entry format and fenced fills (`cache/cache.go`), notices and gaps on RESP3 client tracking (`cache/tracking.go`); `cache/cache_test.go` pins the format |
 | `cacheprovider_test.go` | the emitted `cache` group, and `cachetest` conformance through the Runtime; `cache_format_test.go` adds the planted old-format entry to that suite |
@@ -157,7 +157,7 @@ broken image stops build, vet and test from reporting at all.
   `Get` cannot decode as an entry (an older format, another program's bytes)
   is a miss, never an error: an error counts against the tier's breaker.
   `cache/cache_test.go` pins that on bytes; `cache_format_test.go` proves it on
-  every server the suite runs, planting a `cache/v0.2.0` entry under the keys
+  every server the suite runs, planting a cache/v0.2.0 entry under the keys
   a stack uses and reading through it.
 - **Keep both runtimes at parity.** Moving the image without moving
   `nix/flake.lock` leaves the native runtime on a different redis.
