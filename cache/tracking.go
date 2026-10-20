@@ -15,9 +15,10 @@ package cache
 // if our own code published one.
 //
 // Tracking state lives in the connection and dies with it. So the connection
-// is kept alive (PING, with a read deadline), and when it drops, or a flush
-// invalidates everything at once, the layer reconnects and signals a resync:
-// the stack then flushes the layers above instead of trusting them.
+// is kept alive (PING, with a read deadline), and when it drops the layer
+// reports the gap as lost, reconnects, and reports it resynced; a flush that
+// invalidates everything at once is reported as a gap of no length. The stack
+// flushes the layers above on each report instead of trusting them.
 //
 // The connection is the driver's own, not one of go-redis's pooled
 // connections: a pooled connection only reads pushes when a command happens to
@@ -37,8 +38,6 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-
-	cache "github.com/codefly-dev/interface-cache/go/cache"
 )
 
 const (
@@ -51,7 +50,15 @@ const (
 	trackingRetryMax      = 2 * time.Second
 )
 
-var _ cache.Resyncer = (*Layer)(nil)
+// NoticeBound is the layer's declared cache.Capabilities.NoticeBound: how long
+// after a change its notice can take to arrive, or the gap that swallowed it
+// to be reported lost. A notice from a live tracking connection arrives within
+// a round trip of the write. A connection that went silent is known lost only
+// when its read deadline passes, 3 × trackingPingEvery after the last reply it
+// carried; a cluster primary the layer does not track yet, at the next listing
+// of the primaries, up to trackingTopologyEvery later plus the listing itself.
+// The sum gives each detector the other's period as margin for its round trips.
+const NoticeBound = 3*trackingPingEvery + trackingTopologyEvery
 
 // TrackingClientName is the client name of this layer's tracking
 // connections, as CLIENT LIST shows them: codefly-cache:<prefix>:<layer id>.
@@ -71,16 +78,20 @@ func (l *Layer) Subscribe(ctx context.Context, fn func(key string)) (func(), err
 	return l.listen(ctx, listener{key: fn})
 }
 
-// SubscribeResync implements cache.Resyncer. fn runs once tracking is back
-// after its connection dropped, and when the server invalidates every key at
-// once (FLUSHDB, FLUSHALL).
-func (l *Layer) SubscribeResync(ctx context.Context, fn func()) (func(), error) {
-	return l.listen(ctx, listener{resync: fn})
+// SubscribeGaps implements cache.Resyncer. lost runs when this layer may have
+// missed notices — a tracking connection dropped, or a cluster's primaries
+// changed — within NoticeBound of the gap's start, and resynced once tracking
+// is back. A server flush (FLUSHDB, FLUSHALL) invalidates every key at once,
+// which no notice can name: it is reported as a gap of no length, lost then
+// resynced. A subscriber that arrives during a gap hears lost at once, so that
+// the resynced it will hear follows one.
+func (l *Layer) SubscribeGaps(ctx context.Context, lost, resynced func()) (func(), error) {
+	return l.listen(ctx, listener{lost: lost, resynced: resynced})
 }
 
 type listener struct {
-	key    func(string)
-	resync func()
+	key            func(string)
+	lost, resynced func()
 }
 
 // tracker is a layer's tracking connections, shared by all its listeners and
@@ -91,6 +102,8 @@ type tracker struct {
 	next      int
 	stop      context.CancelFunc
 	done      chan struct{}
+	// inGap is set between lost and resynced; guarded by Layer.trackMu.
+	inGap bool
 }
 
 func (l *Layer) listen(ctx context.Context, fn listener) (func(), error) {
@@ -109,6 +122,11 @@ func (l *Layer) listen(ctx context.Context, fn listener) (func(), error) {
 	id := tr.next
 	tr.next++
 	tr.listeners[id] = fn
+	if tr.inGap && fn.lost != nil {
+		// Reported under the lock: the resynced that ends this gap lists
+		// the listeners under it too, so it follows.
+		fn.lost()
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -146,16 +164,33 @@ func (tr *tracker) changed(key string) {
 	}
 }
 
-func (tr *tracker) resync() {
-	for _, fn := range tr.snapshot() {
-		if fn.resync != nil {
-			fn.resync()
+// lost reports the start of a gap to every listener, and resynced its end.
+// The gap state changes and the listeners are listed under one hold of the
+// lock, so a listener added during the gap hears lost (in listen) before the
+// resynced that ends it.
+func (tr *tracker) lost()     { tr.gap(true) }
+func (tr *tracker) resynced() { tr.gap(false) }
+
+func (tr *tracker) gap(lost bool) {
+	tr.layer.trackMu.Lock()
+	tr.inGap = lost
+	fns := make([]listener, 0, len(tr.listeners))
+	for _, fn := range tr.listeners {
+		fns = append(fns, fn)
+	}
+	tr.layer.trackMu.Unlock()
+	for _, fn := range fns {
+		switch {
+		case lost && fn.lost != nil:
+			fn.lost()
+		case !lost && fn.resynced != nil:
+			fn.resynced()
 		}
 	}
 }
 
-// run serves conns until they fail, then reconnects and signals the gap, until
-// stopped.
+// run serves conns until they fail, then reports the gap, reconnects and
+// reports the resync, until stopped.
 func (tr *tracker) run(ctx context.Context, conns []*trackingConn) {
 	defer close(tr.done)
 	for {
@@ -166,6 +201,8 @@ func (tr *tracker) run(ctx context.Context, conns []*trackingConn) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Tracking is off: whatever changes now goes unreported.
+		tr.lost()
 		backoff := 50 * time.Millisecond
 		for {
 			var err error
@@ -179,9 +216,8 @@ func (tr *tracker) run(ctx context.Context, conns []*trackingConn) {
 			}
 			backoff = min(2*backoff, trackingRetryMax)
 		}
-		// Tracking is on again: anything changed while it was off went
-		// unreported.
-		tr.resync()
+		// Tracking is on again: what changed while it was off went unreported.
+		tr.resynced()
 	}
 }
 
@@ -225,8 +261,11 @@ func (tr *tracker) read(c *trackingConn) {
 		}
 		keys := v.elems[1]
 		if keys.null {
-			// Every key at once: a flush.
-			tr.resync()
+			// Every key at once: a flush. Notices still flow, but none names
+			// what changed, so it is a gap that is over as soon as it is
+			// reported.
+			tr.lost()
+			tr.resynced()
 			continue
 		}
 		for _, k := range keys.elems {
