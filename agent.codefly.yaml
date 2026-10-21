@@ -1,7 +1,7 @@
 publisher: codefly.dev
 kind: codefly:service
 name: redis
-version: 0.0.99
+version: 0.0.100
 release:
   owner: workflow
   workflow: releaser.yml
