@@ -59,4 +59,8 @@ jobs:
           docker logout ghcr.io
           ref=$(jq -er '.name + "@" + .digest' runtime-image.json)
           docker buildx imagetools inspect "$ref"
-          docker run --rm "$ref" redis-server --version | grep -F 'v=8.8.0'
+          # The lock's tag spells the redis version it pins (redis-<version>-...),
+          # and the real-server suite holds both runtimes to it; the published
+          # image has to serve exactly that.
+          version=$(jq -er '.tag' runtime-image.json | sed -E 's/^redis-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/')
+          docker run --rm "$ref" redis-server --version | grep -F "v=$version "

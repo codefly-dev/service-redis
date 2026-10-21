@@ -2,7 +2,13 @@
   description = "codefly redis service: nix runtime (Docker-free)";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # A nixpkgs revision, not a branch: the one shipping the redis that
+    # runtime-image.json pins for the Docker runtime (8.8.0 — the nixos-26.05
+    # channel head of 2026-07-30, the last before stable moved to 8.8.1; 26.05
+    # is also the last branch that evaluates for x86_64-darwin), so both
+    # runtimes serve one redis. Move it with the image: the real-server suite
+    # fails either runtime that reports another version.
+    nixpkgs.url = "github:NixOS/nixpkgs/21ea275a7c46aef9d4d6ddc962e6d562e9d94183";
   };
 
   outputs = { self, nixpkgs }:
