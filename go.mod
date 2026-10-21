@@ -1,6 +1,6 @@
 module github.com/codefly-dev/service-redis
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/codefly-dev/core v0.19.4
