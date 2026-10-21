@@ -87,12 +87,14 @@ go mod tidy -diff     # fails rather than rewriting go.mod/go.sum
 go test ./...         # real redis included; ~30s warm, ~5m30s on a cold image pull
 ```
 
-Two suites are gated on infrastructure, and the gates differ — read which:
+Two suites are gated on infrastructure, and the gates differ — read which. The
+third row is the cache suite pointed at the library's *unreleased* `main`:
 
 | Command | Gate |
 | --- | --- |
 | `REDIS_INFRA_TESTS=required go test -run TestRealRedis -count=1 -v -timeout 30m ./...` | runs whenever the backend is there; `required` turns a *missing* one from a skip into a failure (`infrastructure tests are required but docker is not usable`) |
 | `REDIS_IMAGE_SBOM_TESTS=required go test -run TestImageSBOM -count=1 -v -timeout 30m ./...` | fully opt-in: unset skips even with docker, keeping `go test ./...` off the network |
+| `.github/scripts/cache-library-main.sh [ref]` | `TestRealRedisCache*` with go/cache (and `cachetest`) bumped to interface-cache's `main` in the working tree only, put back afterwards; `.github/workflows/cache-library-main.yml` runs it daily on the Docker target. Red means the library moved and the published driver has not yet — never this tree |
 
 Keep `-timeout 30m`. Go's default 10m is not enough on a cold image cache —
 measured, `TestRealRedisReadinessOverDocker` alone took 590s on a first pull and
@@ -150,7 +152,10 @@ broken image stops build, vet and test from reporting at all.
   `cache/` driver. Only `TestRealRedisCache*` proves them: the conformance suite
   through this agent's Runtime (docker, nix, with and without replicas), plus
   Valkey and a local Redis Cluster. A driver change that has not run it is
-  unverified. The root module requires the *published* driver, so run it on
+  unverified. The library can move too: interface-cache's compile gate
+  (interface-cache#22) and the daily `cache-library-main` workflow are the two
+  halves of catching that before a release — the first sees signatures, only
+  the second sees behaviour. The root module requires the *published* driver, so run it on
   the working tree with an untracked `go.work` (`go work init . ./cache`), and
   land a driver change in two steps: the driver PR, then — once its `cache/`
   tag is cut on `main` — the root bump that puts CI's suite on it. Anything
