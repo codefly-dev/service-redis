@@ -1,0 +1,58 @@
+# Runs TestRealRedisCache* on the PUBLISHED driver this module requires against
+# go/cache (and its cachetest) at interface-cache's unreleased main, through
+# .github/scripts/cache-library-main.sh.
+#
+# Why here, and why a schedule: ci.yml proves the driver against the released
+# go/cache the root module requires, and interface-cache's own gate compiles the
+# newest published driver against every commit of go/cache (interface-cache#22).
+# A behavioural change — a notifier contract tightened, a lease semantic
+# adjusted, a retention rule altered — passes both, and only the conformance
+# suite on a real server sees it. That suite lives in this repository and runs
+# on this agent's Runtime, so this is the one place it can run against main. It
+# needs Docker and minutes, so it runs on a schedule rather than per pull
+# request, and on one target: the full matrix is what ci.yml gives the
+# released versions.
+#
+# A red run is INFORMATION ABOUT go/cache main, not a fault in this tree: the
+# library has moved and the published driver has not yet, and someone decides
+# which side changes. The step summary says which, and nothing is committed —
+# the bump lives in the job's checkout only.
+name: cache driver against go/cache main
+run-name: cache driver against go/cache ${{ inputs.ref || 'main' }} (informational)
+
+on:
+  schedule:
+    # Daily, after interface-cache's working day (UTC-4) has ended, off the
+    # hour because :00 is the busiest minute on the shared runners. GitHub
+    # disables a schedule after 60 days without a push to the repository.
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: branch or commit of codefly-dev/interface-cache, or a go/cache version (v0.4.1)
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-library-main
+  cancel-in-progress: false
+
+jobs:
+  behave:
+    name: published driver on go/cache ${{ inputs.ref || 'main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # The same pins as ci.yml's infrastructure job; setup-go's cache is off
+      # for the same reason it is there.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: TestRealRedisCache* with go/cache at ${{ inputs.ref || 'main' }}
+        run: .github/scripts/cache-library-main.sh "${{ inputs.ref || 'main' }}"
