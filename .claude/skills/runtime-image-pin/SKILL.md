@@ -11,10 +11,14 @@ process rather than a request. Four fields, all required: `name`, `tag`, `digest
 `platforms`.
 
 The image is not upstream redis. `Dockerfile` starts from a digest-pinned
-`redis:*-alpine` and reinstalls exact patched apk versions on top, then publishes
-as `docker.io/codeflydev/redis`. The tag spells out what is pinned
-(`redis-8.8.0-openssl-3.5.8-r0-setpriv-2.41.6-r1-alpine3.23`) so a stale pin is
-legible without resolving the digest.
+`redis:*-alpine` and reinstalls exact patched apk versions on top;
+`.github/workflows/runtime-image.yml` publishes it as
+`ghcr.io/codefly-dev/service-redis-runtime` when a `runtime-v*` git tag is
+pushed. The tag spells out what is pinned
+(`redis-8.8.0-openssl-3.5.9-r0-setpriv-2.41.6-r1-alpine3.23`) so a stale pin is
+legible without resolving the digest — and the real-server suite reads the
+redis version out of it (`pinnedRedisVersion` in `runtime_parity_test.go`), so
+the tag has to keep that `redis-<version>-` shape.
 
 ## The ordering that matters
 
@@ -29,19 +33,16 @@ them catches an unpublished digest:
   image without a registry login.
 
 A pin bumped in the repo but never pushed therefore looks green locally and
-401/404s for everyone downstream. Push the multi-arch image to the public
-registry first, then write its digest into the lock.
+401/404s for everyone downstream. The publish workflow refuses to leave a tag
+behind whose digest differs from the lock's, so the order is: reproduce the
+digest locally, write it into the lock, commit, and only then push the
+`runtime-v*` tag that publishes it.
 
 ## Steps
 
 1. Change what is pinned in `Dockerfile` — the `REDIS_IMAGE` digest, an apk
    version, or both. Keep versions exact; a floating version defeats the lock.
-2. Build and publish the multi-arch image to `docker.io/codeflydev/redis` under a
-   tag that spells out the new pins. Needs registry credentials; CI has none, so
-   this happens out-of-band from the same inputs.
-3. Update `runtime-image.json`: `tag`, `digest` (the *index* digest the push
-   reports), and `platforms` if that changed.
-4. Reproduce the digest locally with exactly what CI runs — the platform list
+2. Reproduce the digest locally with exactly what CI runs — the platform list
    comes from the lock, which is what makes this comparison prove the published
    index ships those platforms:
 
@@ -54,7 +55,7 @@ registry first, then write its digest into the lock.
      --output type=oci,dest=/tmp/runtime-oci.tar,rewrite-timestamp=true \
      --metadata-file /tmp/runtime-meta.json \
      .
-   jq -er '."containerimage.digest"' /tmp/runtime-meta.json   # must equal .digest
+   jq -er '."containerimage.digest"' /tmp/runtime-meta.json   # the new .digest
    ```
 
    A multi-platform build needs a `docker-container` builder — create one with
@@ -64,6 +65,13 @@ registry first, then write its digest into the lock.
    workers`, not on anything to do with the image. `docker buildx inspect
    --bootstrap <name>` starts it.
 
+3. Update `runtime-image.json`: `tag` (keeping the `redis-<version>-` shape),
+   `digest` (the *index* digest the build reported), and `platforms` if that
+   changed. Commit.
+4. Publish: push a `runtime-v*` git tag at that commit. The workflow runs the
+   same build, pushes the index to ghcr under the lock's tag, and fails if the
+   digest it published is not the lock's. CI's reproducibility check passes
+   either way; only the next step tells a published pin from an unpublished one.
 5. Confirm anonymous access the way CI does, so a missing push fails here rather
    than downstream:
 
@@ -92,9 +100,28 @@ registry first, then write its digest into the lock.
 
 ## Parity and adjacent pins
 
-- **The nix runtime is the other half.** Moving the image without moving
-  `nix/flake.lock` leaves the Docker-free runtime on a different redis. Both
-  runtimes are supposed to serve the same server.
+- **The nix runtime is the other half.** It serves the redis of the nixpkgs
+  revision `nix/flake.nix` pins — a revision, not a branch, so `nix flake update`
+  cannot move it on its own. Moving the image moves it too:
+  1. Bound the nixpkgs window shipping the new version by its bump commits:
+     `gh api 'repos/NixOS/nixpkgs/commits?sha=<branch>&path=pkgs/by-name/re/redis/package.nix'`,
+     with `<branch>` the current stable `nixos-<release>` while it still ships
+     the version (stable backports redis patch releases, and 26.05 is the last
+     branch that evaluates for x86_64-darwin at all), else `nixos-unstable`.
+     Pick a channel head inside that window — the release listing under
+     `https://releases.nixos.org/?prefix=nixos/<release or unstable>/` names
+     each with its `git-revision` — because those are what the binary cache has
+     built; the last one carries the most fixes.
+  2. Confirm it: `nix eval --raw github:NixOS/nixpkgs/<rev>#redis.version`.
+  3. Put the revision in `nix/flake.nix`, run `nix flake lock` in `nix/`, and
+     commit both files: the runtime embeds them.
+  4. `REDIS_INFRA_TESTS=required go test -run TestRealRedisRuntimesServeThePinnedRedis -count=1 -v -timeout 30m ./...`
+     holds both runtimes to the lock's tag. The `infrastructure` job runs it on
+     every PR, so a drift cannot merge; every runtime-backed test also logs the
+     version its target served, so a failure on one backend reads against it.
+  The platform lists stay in step the same way:
+  `TestNixFlakeCoversEveryRuntimeImagePlatform` fails a lock platform the flake's
+  `systems` cannot serve.
 - **`platforms` drives three things** — what CI builds, what the digest
   comparison proves, and how many SBOM subjects `runtimeImageSubjects` enumerates.
   Adding one without republishing breaks the second and third.

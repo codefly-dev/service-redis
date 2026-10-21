@@ -41,6 +41,9 @@ type runtimeRedis struct {
 	init        *runtimev0.InitResponse
 	read, write *basev0.Endpoint
 	password    string
+	// version is the redis_version the primary reports: the server this
+	// target actually ran on.
+	version string
 }
 
 func requireBackend(t *testing.T, backend redisBackend) {
@@ -131,7 +134,12 @@ func startRuntimeRedis(t *testing.T, backend redisBackend, replicas int, passwor
 	if err != nil || started.GetStatus().GetState() != runtimev0.StartStatus_STARTED {
 		t.Fatalf("Start over %s: %v, %v", backend, started.GetStatus(), err)
 	}
-	return &runtimeRedis{rt: rt, init: init, read: read.Endpoint, write: write.Endpoint, password: password}
+	r := &runtimeRedis{rt: rt, init: init, read: read.Endpoint, write: write.Endpoint, password: password}
+	// Name the server every target ran on, so a failure on one backend reads
+	// against its version instead of as a flake of the other's.
+	r.version = infoOf(t, redisClient(t, mustSecret(t, r.consumer(t), "redis", "connection")), "server")["redis_version"]
+	t.Logf("%s runtime serves redis %s", backend, r.version)
+	return r
 }
 
 // address is where a consumer on this host reaches endpoint, as Init mapped it.
@@ -171,9 +179,15 @@ func redisClient(t *testing.T, connection string) *goredis.Client {
 // replicationInfoOf reads INFO replication as field:value pairs.
 func replicationInfoOf(t *testing.T, client *goredis.Client) map[string]string {
 	t.Helper()
-	raw, err := client.Info(context.Background(), "replication").Result()
+	return infoOf(t, client, "replication")
+}
+
+// infoOf reads one INFO section as field:value pairs.
+func infoOf(t *testing.T, client *goredis.Client, section string) map[string]string {
+	t.Helper()
+	raw, err := client.Info(context.Background(), section).Result()
 	if err != nil {
-		t.Fatalf("INFO replication on %s: %v", client.Options().Addr, err)
+		t.Fatalf("INFO %s on %s: %v", section, client.Options().Addr, err)
 	}
 	info := map[string]string{}
 	for _, line := range strings.Split(raw, "\r\n") {

@@ -164,8 +164,11 @@ broken image stops build, vet and test from reporting at all.
   `cache/cache_test.go` pins that on bytes; `cache_format_test.go` proves it on
   every server the suite runs, planting a cache/v0.2.0 entry under the keys
   a stack uses and reading through it.
-- **Keep both runtimes at parity.** Moving the image without moving
-  `nix/flake.lock` leaves the native runtime on a different redis.
+- **Keep both runtimes at parity.** Both serve the redis the lock's tag spells
+  out: `nix/flake.nix` pins the nixpkgs revision shipping that version, not a
+  branch, and `TestRealRedisRuntimesServeThePinnedRedis` fails either runtime
+  that reports another. Moving the image means moving the flake with it; the
+  `runtime-image-pin` skill has the order and where to find the revision.
 - **Do not mock the server.** The socket fixtures in `redisprobe_test.go` pin the
   protocol; only `TestRealRedis` proves redis agrees with it. If a boundary is
   hard to reach, reach it anyway.
