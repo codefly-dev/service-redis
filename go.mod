@@ -3,12 +3,12 @@ module github.com/codefly-dev/service-redis
 go 1.27.3
 
 require (
-	github.com/codefly-dev/core v0.19.4
+	github.com/codefly-dev/core v0.19.5
 	github.com/codefly-dev/gortk v0.2.0
 	github.com/codefly-dev/interface-cache/go/cache v0.4.1
 	github.com/codefly-dev/service-redis/cache v0.3.0
 	github.com/gofrs/flock v0.13.1
-	github.com/redis/go-redis/v9 v9.22.0
+	github.com/redis/go-redis/v9 v9.23.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
@@ -99,7 +99,7 @@ require (
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
