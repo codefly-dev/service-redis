@@ -69,11 +69,14 @@ native redis process dies on its own, the agent reports the service as failed
 rather than continuing to advertise it as started.
 
 The native runner records Core's stable boot-session and process-birth identity.
-It also carries the current launching workspace through Nix materialization,
-so scoped lifecycle commands can attribute a server whose data directory is
-outside the workspace. Cached development-shell exports cannot replace that
-launch marker. Scope metadata does not authorize signaling: Core still checks
-the recorded process birth before delivering a signal.
+It also carries the current launching workspace through Nix materialization
+and persists it in Core's versioned ownership record. This survives Redis's
+process-title/environment rewriting and the death of the controlling CLI, even
+when the data directory is outside the workspace. Cached shell exports cannot
+replace that launch marker. Scoped lifecycle commands must consume Core's
+ownership discovery and inspection API; older readers ignore the new record
+namespace and cannot recover these new runs. Scope metadata does not authorize
+signaling: Core still checks the recorded process birth before delivery.
 
 Agents built before this identity update can leave older clock-based records.
 Updating the agent affects new runs; it does not rewrite retained evidence or
