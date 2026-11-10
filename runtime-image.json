@@ -1,7 +1,7 @@
 {
   "name": "ghcr.io/codefly-dev/service-redis-runtime",
-  "tag": "redis-8.8.0-openssl-3.5.9-r0-setpriv-2.41.6-r1-alpine3.23",
-  "digest": "sha256:c51c661de8588af46721b207716f3cf2463cc23435a4696c59db2d4da5354449",
+  "tag": "redis-8.8.0-openssl-3.5.9-r0-setpriv-2.41.6-r1-musl-1.2.5-r24-zlib-1.4-r0-alpine3.23",
+  "digest": "sha256:e50cf038c5199b405e278249d40cbad29a63f9e6d57b36769be8baae7690d050",
   "platforms": [
     "linux/amd64",
     "linux/arm64"
