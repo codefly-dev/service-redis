@@ -146,6 +146,9 @@ func TestRuntimeDockerfilePinsPatchedOpenSSL(t *testing.T) {
 		"libcrypto3=3.5.9-r0",
 		"libssl3=3.5.9-r0",
 		"setpriv=2.41.6-r1",
+		"musl=1.2.5-r24",
+		"musl-utils=1.2.5-r24",
+		"zlib=1.4-r0",
 	} {
 		if !strings.Contains(dockerfile, want) {
 			t.Errorf("Dockerfile missing %q", want)
