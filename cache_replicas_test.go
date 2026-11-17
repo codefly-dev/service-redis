@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -169,8 +170,9 @@ func (l primaryNotices) Subscribe(ctx context.Context, fn func(string)) (func(),
 // after a write to the primary, can a replica still serve the old value, and
 // for how long; and what does a stack reading through the replica return once
 // it has been invalidated. Timings are logged, not asserted — they describe
-// this host. What is asserted is the property the driver relies on: a notice
-// delivered by the replica never precedes the write it announces there.
+// this host. What is asserted is the property the driver relies on, a notice
+// delivered by the replica never precedes the write it announces there, and
+// what follows from it: no stale copy is kept above the replica.
 func measureReplicationLag(t *testing.T, primaryConnection, replicaConnection string) {
 	ctx := context.Background()
 	const writes = 1000
@@ -292,8 +294,16 @@ func measureReplicationLag(t *testing.T, primaryConnection, replicaConnection st
 
 	// 3. What a stack reading through the replica returns. A reader re-reads
 	// continuously, as a busy consumer would, so an eviction is refilled at
-	// once; after each write settles, the stack must serve that write.
-	stuck := func(layer cacheiface.Layer) int {
+	// once. A copy refilled from a replica that did not have the write yet is
+	// kept by the tier above for its TTL, an hour here, so waiting tells it
+	// from a notice that is merely late: late is how many reads 20ms after a
+	// write still returned the previous value, stuck how many of those never
+	// returned the write within settle. Only stuck is asserted. Late is a
+	// timing and describes this host: the reader never blocks, so under
+	// GOMAXPROCS=1 it holds the only P until it is preempted, and the write's
+	// reply and the notice each wait some 20ms for the netpoller.
+	const settle = 3 * time.Second
+	settled := func(layer cacheiface.Layer) (late, stuck int) {
 		p := cacheiface.NewPartition("tenant-" + ns)
 		reader := replicaStack(t, layer)
 		writerStack := replicaStack(t, rediscache.New(primary, rediscache.WithPrefix(ns)))
@@ -306,26 +316,36 @@ func measureReplicationLag(t *testing.T, primaryConnection, replicaConnection st
 			}
 		}()
 		defer func() { stop.Store(true); <-done }()
-		var stuck int
+		serves := func(want string) bool {
+			got, _ := reader.Get(ctx, p, "stack")
+			return string(got) == want
+		}
 		for i := range 100 {
 			want := fmt.Sprint(i)
 			mustCache(t, writerStack.Set(ctx, p, "stack", []byte(want)))
 			time.Sleep(20 * time.Millisecond)
-			if got, _ := reader.Get(ctx, p, "stack"); string(got) != want {
-				stuck++
+			if serves(want) {
+				continue
+			}
+			late++
+			for deadline := time.Now().Add(settle); !serves(want); time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					stuck++
+					break
+				}
 			}
 		}
-		return stuck
+		return late, stuck
 	}
-	withReplica := stuck(rediscache.New(primary, rediscache.WithPrefix(ns), rediscache.WithReplica(replica)))
-	withPrimaryNotices := stuck(primaryNotices{
+	replicaLate, replicaStuck := settled(rediscache.New(primary, rediscache.WithPrefix(ns), rediscache.WithReplica(replica)))
+	primaryLate, primaryStuck := settled(primaryNotices{
 		Layer:   rediscache.New(primary, rediscache.WithPrefix(ns), rediscache.WithReplica(replica)),
 		notices: rediscache.New(primary, rediscache.WithPrefix(ns)),
 	})
-	t.Logf("stack reading through the replica, 20ms after each of 100 writes: stale %d/100 with the replica's notices (WithReplica), %d/100 with the primary's",
-		withReplica, withPrimaryNotices)
-	if withReplica != 0 {
-		t.Errorf("a stack reading through the replica with its notices still served %d stale values after the write settled", withReplica)
+	t.Logf("stack reading through the replica, over 100 writes (GOMAXPROCS=%d): with the replica's notices (WithReplica) %d still old 20ms after the write and %d still old %s after it; with the primary's, %d and %d",
+		runtime.GOMAXPROCS(0), replicaLate, replicaStuck, settle, primaryLate, primaryStuck)
+	if replicaStuck != 0 {
+		t.Errorf("a stack reading through the replica with its notices still served the previous value %s after %d of 100 writes: a stale copy was kept above the replica", settle, replicaStuck)
 	}
 }
 
