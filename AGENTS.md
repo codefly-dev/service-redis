@@ -14,49 +14,17 @@ configuration flow — this agent consumes them, it does not decide them.
 
 ## How you build here
 
-1. **What a person exercises is a composed service.** A playground is a service
-   in this repo's own workspace, started by `codefly run service`, reaching its
-   API through a declared dependency and an `${endpoint:…}` reference, with
-   identities from `--fixture`. A surface with no backend is a story on
-   fixtures. Never a hand-written dev server, a static page beside it, a
-   launcher that passes an address between processes, or a demo container. A
-   module that cannot be exercised without a host is a fixture gap filed
-   against the CLI or the SDK, never a harness written here.
-2. **Code generated from a contract comes from `codefly generate`** — `proto`,
-   `client`, `contracts`, `runnables`, `runnable-bindings`. Never this repo's
-   own generator pipeline, never a hand-written client for a contract that has
-   one, never a local gate on hand-generated output. A missing language, plugin
-   or flag is an issue against the CLI, named in the pull request.
-3. **Never hardcode anything the system resolves.** No address, port, DSN,
-   credential or host name is written down — not in code, configuration,
-   tests, scripts, docs, or a command you type. Addresses come from
-   `codefly.For(ctx)`, from `${endpoint:…}` in configuration, from the
-   generated client in a frontend, and from the suite's resolver in a test;
-   secrets from `codefly config generate`; a running service's address from
-   `codefly endpoint`. A value the SDK or the CLI cannot resolve, or resolves
-   wrong, is a bug in that tool to fix, not a value to type or copy from a
-   log: typing it encodes something true on one machine for ten minutes, and
-   it fails quietly.
-4. **Local first, from the lowest level; no pull request until it is
-   validated on an environment.** Every change climbs this ladder in order and
-   is fixed at the first rung that fails: (1) unit tests; (2) composed tests
-   with the Codefly SDK (`WithDependency`) and the local authority, so
-   permissions are proven, not assumed; (3) this repo's playground, exercised
-   in a browser; (4) the solution run locally (`codefly run`, authority dev
-   mode, the fixture people); (5) a deploy to a non-production environment
-   (a dev cell) built from the local branch — no CI, no merge, and the
-   only push is the gitops promotion; (6) QA and validation there. Only then
-   (7) the pull request — even for an approved release. A **product or
-   contract change** — a boundary, a capability, a story's promise, a
-   decision, a concept, a word, a gate — is still proposed first; a technical
-   change is proposed, if a contract has to move at all, only after it runs.
-   Integration tests driven from the API against a running environment are the
-   next rung, being built.
-5. **No cluster tests.** No test — CI job, workflow step, make target, script
-   or build-tagged suite — starts k3s, k3d, kind, minikube or any Kubernetes
-   cluster. Authorization and admission are proven in-process against the
-   authority core; a deployment is validated by `codefly run` and a hosted dev
-   cell, never by a test.
+Governed by the handbook's [development contract](https://github.com/obin-ai/handbook/blob/main/getting-started/development.md);
+read it before the first change. In short:
+
+1. What a person exercises is a composed service started by `codefly run
+   service`, never a hand-written server or a launcher.
+2. Code generated from a contract comes from `codefly generate`.
+3. Never hardcode an address, port, DSN, credential or host name; the SDK and
+   the CLI resolve each one.
+4. Local first, from the lowest level, and no pull request until the change is
+   validated on an environment.
+5. No test starts a Kubernetes cluster.
 
 ## How to behave
 
@@ -73,12 +41,9 @@ was supposed to resolve, and the result still boots and serves.
   existing seam answered, and your reason for its placement is that a
   convenient loop was already there rather than that the responsibility belongs
   to it.
-- **Build the simplest thing that works; size is the signal.** A coding task's
-  budget is about **500 hand-written lines** — generated output does not count,
-  tests count apart — and past **2,000** the change has become a second system,
-  so **stop and ask the user** instead of finishing it. Two tells, checkable
-  before the code exists: you cannot name the one responsibility the change
-  adds, and it is growing to make the end goal pass rather than to put a
+- **Build the simplest thing that works.** Two tells that a change is not it,
+  checkable before the code exists: you cannot name the one responsibility the
+  change adds, and it is growing to make the end goal pass rather than to put a
   behaviour where it belongs. Wanting it to work licenses no means to get
   there.
 - **A gap in the tooling is a bug in the tooling — never a reason to reach around
@@ -146,11 +111,9 @@ Keep `-timeout 30m`. Go's default 10m is not enough on a cold image cache —
 measured, `TestRealRedisReadinessOverDocker` alone took 590s on a first pull and
 timed out; warm, the whole suite is ~2m.
 
-The `image` job additionally builds the runtime image, smoke-tests it with
-`redis-cli ping`, scans it with trivy (`HIGH,CRITICAL`, `--exit-code 1`), and
-verifies the pin two independent ways: that the digest is reproducible from these
-inputs, and that it is *anonymously* pullable. The `ci` job `needs: image`, so a
-broken image stops build, vet and test from reporting at all.
+The `ci` job `needs: image`, so a broken image stops build, vet and test from
+reporting at all; what the `image` job checks is in the `runtime-image-pin`
+skill.
 
 ## Where things live
 
@@ -186,13 +149,10 @@ broken image stops build, vet and test from reporting at all.
   container: deliberate and owner-accepted, because core's docker runner has no
   container-to-container network. Changing that is a core capability, not a
   workaround to build here.
-- **`runtime-image.json` is a lock, not documentation.** Publish the image before
-  you pin its digest: the reproducibility check passes on a pin that was never
-  pushed, and only the anonymous-pull check catches it. See the
-  `runtime-image-pin` skill.
-- **The platform list in the lock is load-bearing.** CI builds exactly those
-  platforms, so the digest comparison is what proves the published index ships
-  them, and image SBOM evidence owes one subject per platform.
+- **`runtime-image.json` is a lock, not documentation,** and its platform list
+  is load-bearing. Publish the image before you pin its digest. Why only one of
+  CI's two checks catches a pin that was never pushed, and what the platform
+  list drives, are in the `runtime-image-pin` skill.
 - **This agent provides `codefly.dev/cache`** (codefly-dev/interface-cache):
   the `cache` group (`driver: redis`, the `redis` group's `connection`) and the
   `cache/` driver. Only `TestRealRedisCache*` proves them: the conformance suite

@@ -38,6 +38,11 @@ behind whose digest differs from the lock's, so the order is: reproduce the
 digest locally, write it into the lock, commit, and only then push the
 `runtime-v*` tag that publishes it.
 
+CI's `image` job builds the runtime image, smoke-tests it with `redis-cli ping`,
+scans it with trivy (`HIGH,CRITICAL`, `--exit-code 1`), and runs both checks
+above. The `ci` job `needs: image`, so a broken image stops build, vet and test
+from reporting at all.
+
 ## Steps
 
 1. Change what is pinned in `Dockerfile` — the `REDIS_IMAGE` digest, an apk
@@ -124,7 +129,9 @@ digest locally, write it into the lock, commit, and only then push the
   `systems` cannot serve.
 - **`platforms` drives three things** — what CI builds, what the digest
   comparison proves, and how many SBOM subjects `runtimeImageSubjects` enumerates.
-  Adding one without republishing breaks the second and third.
+  CI builds exactly those platforms, so the digest comparison is what proves
+  the published index ships them, and image SBOM evidence owes one subject per
+  platform. Adding one without republishing breaks the second and third.
 - Subjects carry no digest by design: the pinned reference addresses a manifest
   index, and the scanner binds evidence to each platform's child manifest, which
   never equals the index digest.
