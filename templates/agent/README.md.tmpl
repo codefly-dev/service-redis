@@ -62,11 +62,24 @@ real-server suite fails either runtime that reports another.
 | Stop (native) with `keep-running: true` | retained — the server stays up for reuse | retained; the server keeps serving it and keeps snapshotting on its save point |
 | Stop (Docker) | retained — the container stays up for reuse | retained, in the running container |
 | Destroy (native) | released | retained on disk, same as Stop |
+| Destroy (native), in a disposable run | released | removed, with the generated config |
 | Destroy (Docker) | released; the container is removed | **discarded** — the container has no volume, so removing it removes its data |
 
-No operation deletes the native data directory or the generated config. If the
+No operation deletes your native data directory or the generated config: a stop
+or a destroy is never read as permission to (`codefly-dev/core#424`). If the
 native redis process dies on its own, the agent reports the service as failed
 rather than continuing to advertise it as started.
+
+That permission is the run's own to state. A **disposable run** — `codefly run
+--temporary-ports`, or a test's dependency stack, whose naming scope Codefly
+generated and nothing can run again — says so in the environment it hands the
+agent. Its native state (one directory per server under the user cache
+directory, `codefly/redis/`, a replica's included) is removed when the run
+ends: by the run itself once it has stopped its services, by the service when
+it is destroyed, or, when the run was killed, by the next Redis service to
+start on the machine or by `codefly clear`. A server still running keeps its
+directory until it is stopped. A plain run, and a run under a naming scope you
+named, is never disposable: its data is retained through every operation.
 
 The native runner records Core's stable boot-session and process-birth identity.
 It also carries the current launching workspace through Nix materialization

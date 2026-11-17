@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/codefly-dev/core/runners/runstate"
 	"io"
 	"net"
 	"os"
@@ -173,7 +174,7 @@ func TestRealRedisReadinessOverNix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	server, err := newNixRedis(ctx, t.TempDir(), port, password, io.Discard)
+	server, err := newNixRedis(ctx, runstate.Run{}, t.TempDir(), port, password, io.Discard)
 	if err != nil {
 		t.Fatalf("newNixRedis: %v", err)
 	}
@@ -181,6 +182,9 @@ func TestRealRedisReadinessOverNix(t *testing.T) {
 	if err = server.Init(ctx); err != nil {
 		t.Fatalf("nix redis Init: %v", err)
 	}
+	// The root is outside any t.TempDir() where the user cache directory does
+	// not follow XDG_CACHE_HOME (macOS). Cleanup is LIFO: Stop runs first.
+	t.Cleanup(func() { _ = os.RemoveAll(server.root) })
 	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))

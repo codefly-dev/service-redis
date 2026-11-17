@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/codefly-dev/core/runners/runstate"
 	"net"
 	"os"
 	"path/filepath"
@@ -51,7 +52,7 @@ func TestNixRedisConcurrentInvocationsAreIsolated(t *testing.T) {
 		wg.Add(1)
 		go func(i int, scope, password string) {
 			defer wg.Done()
-			server, err := newNixRedis(ctx, redisStateKey(location, scope), ports[i], password, nil)
+			server, err := newNixRedis(ctx, runstate.Run{Workspace: location, NamingScope: scope}, redisStateKey(location, scope), ports[i], password, nil)
 			if err != nil {
 				errs[i] = err
 				return
@@ -213,7 +214,7 @@ func TestNixRedisFailedInitReleasesItsClaim(t *testing.T) {
 	}
 
 	location := t.TempDir()
-	server, err := newNixRedis(context.Background(),
+	server, err := newNixRedis(context.Background(), runstate.Run{},
 		redisStateKey(location, "inv"+uniqueScopeSuffix(t)+"fail"), freePort(t), "unused", nil)
 	if err != nil {
 		t.Fatal(err)

@@ -25,8 +25,18 @@ package main
 // credential-bearing redis.conf and the data dir are per-session: their root is
 // keyed by the service location AND the codefly naming scope, so two concurrent
 // invocations of the same service never write each other's config or data.
+//
+// Stop and Destroy end execution and retain that root: this agent never infers
+// the right to delete data (codefly-dev/core#424). The one exception is stated
+// by the run's caller, not inferred. A run whose environment is disposable (a
+// generated naming scope: temporary ports, a test's dependency stack) can never
+// be run again, so its roots are removed: by its agent's Destroy, or, when the
+// run was killed, by the next redis agent to initialize on this machine or by
+// `codefly clear`. The record and the rule are core's (runners/runstate),
+// shared with every native store.
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	_ "embed"
@@ -35,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +55,7 @@ import (
 	"time"
 
 	runners "github.com/codefly-dev/core/runners/base"
+	"github.com/codefly-dev/core/runners/runstate"
 	"github.com/codefly-dev/core/wool"
 	"github.com/gofrs/flock"
 )
@@ -114,6 +126,13 @@ type nixRedis struct {
 	// same root is refused rather than silently rewriting them. Released by Stop
 	// (and by the kernel if the agent dies).
 	owner *flock.Flock
+	// root is this server's runtime root, run the run it serves, and state this
+	// agent's claim on the root for that run (runners/runstate). The claim
+	// outlives Stop, because a stopped service starts again inside its run and
+	// must find its data: only the Runtime's Destroy withdraws it.
+	root  string
+	run   runstate.Run
+	state *runstate.Hold
 	// sharedNixRoot holds the immutable flake and its materialization cache,
 	// shared by every invocation on this host.
 	sharedNixRoot string
@@ -133,27 +152,28 @@ type nixRedis struct {
 // avoids invalidating parent flakes and committing runtime state.
 //
 // stateKey comes from redisStateKey: the service location plus the codefly
-// naming scope. It never contains the password.
-func newNixRedis(ctx context.Context, stateKey string, port uint16, password string, out io.Writer) (*nixRedis, error) {
+// naming scope. It never contains the password. run is the run the root is
+// recorded as belonging to, which is what decides whether it is ever removed.
+func newNixRedis(ctx context.Context, run runstate.Run, stateKey string, port uint16, password string, out io.Writer) (*nixRedis, error) {
 	runtimeRoot, err := redisRuntimeRoot(stateKey)
 	if err != nil {
 		return nil, err
 	}
-	if err := prepareRuntimeRoot(runtimeRoot); err != nil {
-		return nil, err
-	}
-	owner, err := claimRuntimeRoot(ctx, runtimeRoot, runtimeRootClaimTimeout)
+	collectAbandonedRunState(filepath.Dir(runtimeRoot), runtimeRoot)
+	owner, state, err := claimRunState(ctx, runtimeRoot, run, runtimeRootClaimTimeout)
 	if err != nil {
 		return nil, err
 	}
 	releaseLegacyNixCache(runtimeRoot, out)
 	sharedNixRoot, flakeDir, err := materializeSharedFlake(ctx, out)
 	if err != nil {
+		_ = state.Release()
 		releaseRuntimeRoot(owner)
 		return nil, err
 	}
 	env, err := runners.NewNixEnvironment(ctx, flakeDir)
 	if err != nil {
+		_ = state.Release()
 		releaseRuntimeRoot(owner)
 		return nil, fmt.Errorf("nix environment (is nix installed?): %w", err)
 	}
@@ -167,8 +187,122 @@ func newNixRedis(ctx context.Context, stateKey string, port uint16, password str
 		password:      password,
 		out:           out,
 		owner:         owner,
+		root:          runtimeRoot,
+		run:           run,
+		state:         state,
 		sharedNixRoot: sharedNixRoot,
 	}, nil
+}
+
+// ownerLockName is the file a runtime root's exclusive lock is taken on.
+const ownerLockName = ".owner.lock"
+
+// claimRunState makes runtimeRoot this invocation's: it creates the root,
+// takes its exclusive lock, and records the run and this agent on it
+// (runstate.Claim), which is what later lets a disposable run's root be
+// removed and keeps every other root for good.
+//
+// A disposable root is removed under that same lock (disposeRunState,
+// collectAbandonedRunState), so a lock won on a root that was removed while
+// this call waited guards nothing: the root is created and locked again.
+func claimRunState(ctx context.Context, runtimeRoot string, run runstate.Run, wait time.Duration) (*flock.Flock, *runstate.Hold, error) {
+	for {
+		if err := prepareRuntimeRoot(runtimeRoot); err != nil {
+			return nil, nil, err
+		}
+		owner, err := claimRuntimeRoot(ctx, runtimeRoot, wait)
+		if errors.Is(err, os.ErrNotExist) && ctx.Err() == nil {
+			// Removed between the creation above and the lock.
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := os.Stat(filepath.Join(runtimeRoot, ownerLockName)); err != nil {
+			releaseRuntimeRoot(owner)
+			continue
+		}
+		state, err := runstate.Claim(runtimeRoot, run)
+		if err != nil {
+			releaseRuntimeRoot(owner)
+			return nil, nil, err
+		}
+		return owner, state, nil
+	}
+}
+
+// disposeRunState withdraws an agent's claim on a runtime root, which is what
+// Destroy means for it, and removes the root when its run was declared
+// disposable and nothing uses it any more. It reports whether it removed it.
+// The server is already stopped: a root whose lock another invocation holds is
+// in use, and is left to it.
+func disposeRunState(runtimeRoot string, state *runstate.Hold) (bool, error) {
+	if _, err := os.Stat(filepath.Join(runtimeRoot, ownerLockName)); err != nil {
+		// Already removed, by this run's caller or by a peer's collection.
+		return false, state.Release()
+	}
+	owner := flock.New(filepath.Join(runtimeRoot, ownerLockName), flock.SetPermissions(0o600))
+	held, err := owner.TryLock()
+	if err != nil || !held {
+		_ = owner.Close()
+		return false, state.Release()
+	}
+	defer releaseRuntimeRoot(owner)
+	if err := state.Release(); err != nil {
+		return false, err
+	}
+	return runstate.Collect(runtimeRoot)
+}
+
+// collectAbandonedRunState removes every other runtime root on this machine
+// that a disposable run left behind without destroying its agent: a run that
+// was killed. runstate.Collect decides, and removes only a root every claimant
+// declared disposable and that no live agent or server uses; a root nobody
+// claimed (it predates the record, or is the shared nix root) is never
+// touched. A root whose lock is taken is in use right now and is left alone.
+//
+// Best effort: this reclaims disk, and a start must not fail over it.
+func collectAbandonedRunState(cache, self string) {
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		root := filepath.Join(cache, entry.Name())
+		if !entry.IsDir() || root == self {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, ownerLockName)); err != nil {
+			continue
+		}
+		lock := flock.New(filepath.Join(root, ownerLockName), flock.SetPermissions(0o600))
+		if held, err := lock.TryLock(); err == nil && held {
+			_, _ = runstate.Collect(root)
+			_ = lock.Unlock()
+		}
+		_ = lock.Close()
+	}
+}
+
+// runState is one runtime root this agent claimed for its run.
+type runState struct {
+	root string
+	hold *runstate.Hold
+}
+
+// runStates are the claims of this server and of its replicas, each on its own
+// root.
+func (n *nixRedis) runStates() []runState {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var states []runState
+	if n.state != nil {
+		states = append(states, runState{root: n.root, hold: n.state})
+	}
+	for _, replica := range n.replicas {
+		states = append(states, replica.runStates()...)
+	}
+	return states
 }
 
 // redisStateKey identifies the mutable state a redis invocation owns. An
@@ -197,9 +331,10 @@ func redisReplicaStateKey(stateKey string, i int) string {
 func (n *nixRedis) attachReplicas(ctx context.Context, stateKey string, ports []uint16) error {
 	replicas := make([]*nixRedis, 0, len(ports))
 	for i, port := range ports {
-		replica, err := newNixRedis(ctx, redisReplicaStateKey(stateKey, i+1), port, n.password, n.out)
+		replica, err := newNixRedis(ctx, n.run, redisReplicaStateKey(stateKey, i+1), port, n.password, n.out)
 		if err != nil {
 			for _, prepared := range replicas {
+				_ = prepared.state.Release()
 				releaseRuntimeRoot(prepared.owner)
 			}
 			return fmt.Errorf("prepare redis replica %d: %w", i+1, err)
@@ -273,7 +408,7 @@ func prepareRuntimeRoot(runtimeRoot string) error {
 // so the second is refused with the way out, but only after waiting long enough
 // for an ordinary restart to complete its handover.
 func claimRuntimeRoot(ctx context.Context, runtimeRoot string, wait time.Duration) (*flock.Flock, error) {
-	owner := flock.New(filepath.Join(runtimeRoot, ".owner.lock"), flock.SetPermissions(0o600))
+	owner := flock.New(filepath.Join(runtimeRoot, ownerLockName), flock.SetPermissions(0o600))
 	claimCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	held, err := owner.TryLockContext(claimCtx, 50*time.Millisecond)
@@ -484,7 +619,36 @@ func (n *nixRedis) launch(ctx context.Context) (err error) {
 	if startErr := n.startServer(ctx); startErr != nil {
 		return startErr
 	}
-	return n.waitReady(ctx)
+	if readyErr := n.waitReady(ctx); readyErr != nil {
+		return readyErr
+	}
+	return n.trackServer(ctx)
+}
+
+// trackServer records the running server on this agent's claim. The server is
+// in its own process group and outlives an agent that is killed: while it
+// runs, its root is in use whoever else is gone. The pid is the server's own
+// answer (INFO server), over the handshake readiness just proved.
+func (n *nixRedis) trackServer(ctx context.Context) error {
+	if n.state == nil {
+		return nil
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", n.port)
+	var pid int
+	err := withRedisHandshake(ctx, addr, n.password, func(conn net.Conn, reader *bufio.Reader) error {
+		info, err := redisInfo(ctx, conn, reader, addr, "server")
+		if err != nil {
+			return err
+		}
+		if pid, err = strconv.Atoi(info["process_id"]); err != nil {
+			return fmt.Errorf("redis on %s reports no process id: %w", addr, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("identify the redis server process: %w", err)
+	}
+	return n.state.Track(pid)
 }
 
 // initSharedEnv materializes the shared nix env and resolves redis-server out

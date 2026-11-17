@@ -12,6 +12,7 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/runners/runstate"
 	"github.com/codefly-dev/core/wool"
 
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
@@ -43,6 +44,11 @@ type Runtime struct {
 	// clear it.
 	nixRuntime   *nixRedis
 	nixRuntimeMu sync.Mutex
+	// nativeStates are this agent's claims on the native runtime roots of its
+	// run. They outlive nixRuntime, which Stop clears: a stopped service starts
+	// again inside its run, so only Destroy withdraws them (disposeNative).
+	// Guarded by nixRuntimeMu.
+	nativeStates []runState
 
 	redisPort uint16
 	// replicaAddresses are the host addresses of the read replicas Init
@@ -68,6 +74,41 @@ func (s *Runtime) nativeRuntime() *nixRedis {
 	s.nixRuntimeMu.Lock()
 	defer s.nixRuntimeMu.Unlock()
 	return s.nixRuntime
+}
+
+// claimNativeStates records the roots nixr claimed as this agent's, in place of
+// those of the server it replaces: a service that starts again in this agent
+// claims its roots anew.
+func (s *Runtime) claimNativeStates(nixr *nixRedis) {
+	states := nixr.runStates()
+	s.nixRuntimeMu.Lock()
+	previous := s.nativeStates
+	s.nativeStates = states
+	s.nixRuntimeMu.Unlock()
+	for _, state := range previous {
+		_ = state.hold.Release()
+	}
+}
+
+// disposeNative ends this agent's use of its run's native roots, which is what
+// Destroy means for them: the roots of a disposable run are removed, every
+// other root is retained. A root that cannot be collected now stays, and the
+// next redis agent to initialize on this machine, or `codefly clear`, collects
+// it.
+func (s *Runtime) disposeNative() {
+	s.nixRuntimeMu.Lock()
+	states := s.nativeStates
+	s.nativeStates = nil
+	s.nixRuntimeMu.Unlock()
+	for _, state := range states {
+		removed, err := disposeRunState(state.root, state.hold)
+		switch {
+		case err != nil:
+			s.Wool.Warn("cannot collect the run's native redis state", wool.Field("root", state.root), wool.ErrField(err))
+		case removed:
+			s.Wool.Debug("removed disposable native redis state", wool.Field("root", state.root))
+		}
+	}
 }
 
 // releaseNativeRuntime stops the native redis this runtime owns, if any, and
@@ -243,7 +284,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			return s.Runtime.InitError(errRelease)
 		}
 		stateKey := redisStateKey(s.Location, s.Environment.GetNamingScope())
-		nixr, errNix := newNixRedis(ctx, stateKey, uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
+		run := runstate.For(s.Identity.WorkspacePath, s.Environment)
+		nixr, errNix := newNixRedis(ctx, run, stateKey, uint16(instance.Port), s.redisPassword, newRedisLogWriter(s.Wool))
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}
@@ -252,7 +294,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		// reach it; retaining it here means a failed rollback still has an owner
 		// that Stop and Destroy can retry.
 		s.setNativeRuntime(nixr)
-		if errNix = nixr.attachReplicas(ctx, stateKey, replicaPorts); errNix != nil {
+		errNix = nixr.attachReplicas(ctx, stateKey, replicaPorts)
+		s.claimNativeStates(nixr)
+		if errNix != nil {
 			return s.Runtime.InitError(errors.Join(errNix, nixr.Stop(ctx)))
 		}
 		if errNix = nixr.Init(ctx); errNix != nil {
@@ -558,10 +602,15 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	// retry path for both.
 	if s.nativeRuntime() != nil {
 		if err := s.releaseNativeRuntime(ctx); err != nil {
+			// The claims stay with the handle: the server may still be alive.
 			return s.Runtime.DestroyError(err)
 		}
+		s.disposeNative()
 		return s.Runtime.DestroyResponse()
 	}
+	// A Stop already released the server and left its claims behind, so
+	// withdrawing them does not depend on a server having been found.
+	s.disposeNative()
 	// Destroy owns only the container generation acquired by this invocation's
 	// Init, including partially initialized handles. A fresh environment has no
 	// acquired ID, so Shutdown would silently do nothing; resolving the name

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/codefly-dev/core/runners/runstate"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -530,7 +531,7 @@ func TestResolveStoreAgainstRealNix(t *testing.T) {
 		t.Skip("nix is not installed")
 	}
 	ctx := context.Background()
-	n, err := newNixRedis(ctx, redisStateKey(t.TempDir(), "inv"+uniqueScopeSuffix(t)), 16379, "", nil)
+	n, err := newNixRedis(ctx, runstate.Run{}, redisStateKey(t.TempDir(), "inv"+uniqueScopeSuffix(t)), 16379, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

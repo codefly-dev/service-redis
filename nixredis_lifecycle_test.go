@@ -91,7 +91,8 @@ func fakeRedisMain(mode string) {
 		}
 		// Same command handling the socket fixtures use: AUTH against the
 		// configured password, then PING, and "-NOAUTH" for a PING before it.
-		go (&authRedis{password: password}).handle(conn)
+		// INFO names this process, as a server's own does.
+		go (&authRedis{password: password, info: replicationInfo("process_id:" + strconv.Itoa(os.Getpid()))}).handle(conn)
 	}
 }
 
