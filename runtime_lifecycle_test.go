@@ -56,8 +56,11 @@ func breakRuntimeRoot(t *testing.T) {
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", blocker)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(blocker, "cache"))
+	// The suite keeps its native state in a store of its own (TestMain), so
+	// that store is what is broken, not the user cache directory.
+	suite := redisCacheRoot
+	redisCacheRoot = func() (string, error) { return filepath.Join(blocker, "cache", "codefly", "redis"), nil }
+	t.Cleanup(func() { redisCacheRoot = suite })
 }
 
 // startedNativeRuntime hands back a runtime that owns a running native redis,
