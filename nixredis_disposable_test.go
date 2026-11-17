@@ -3,16 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
+	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/runners/runstate"
 	"github.com/gofrs/flock"
 	goredis "github.com/redis/go-redis/v9"
@@ -148,10 +152,78 @@ func TestHelperClaimRunState(t *testing.T) {
 	if root == "" {
 		return
 	}
+	if os.Getenv(claimHelperDir+"_LAUNCHER") != "" {
+		// Stand in for the run: launch the agent, and be gone before the test
+		// looks, as a killed CLI is.
+		agent := exec.Command(os.Args[0], "-test.run=^TestHelperClaimRunState$")
+		agent.Env = append(os.Environ(), claimHelperDir+"_LAUNCHER=")
+		out, err := agent.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return
+	}
 	run := runstate.Run{Workspace: "/work/shop", NamingScope: os.Getenv(claimHelperDir + "_SCOPE")}
 	run.Disposable = run.NamingScope != ""
-	_, _, err := claimRunState(context.Background(), root, run, time.Second)
+	_, hold, err := claimRunState(context.Background(), root, run, time.Second)
 	require.NoError(t, err)
+	if pidFile := os.Getenv(claimHelperDir + "_SERVER"); pidFile != "" {
+		// The server the agent leaves running: a process of its own session,
+		// which outlives the agent and its run.
+		server := exec.Command("sleep", "300")
+		server.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		require.NoError(t, server.Start())
+		require.NoError(t, hold.Track(server.Process.Pid))
+		require.NoError(t, os.WriteFile(pidFile, []byte(strconv.Itoa(server.Process.Pid)), 0o600))
+	}
+}
+
+// abandonedServer is the runtime root of an agent that is gone and the PID of
+// the server it left running there. killedRun says whether the run that
+// launched the agent is gone too.
+func abandonedServer(t *testing.T, cache, name, scope string, killedRun bool) (string, int) {
+	t.Helper()
+	root := filepath.Join(cache, name)
+	pidFile := filepath.Join(t.TempDir(), "server.pid")
+	claim := exec.Command(os.Args[0], "-test.run=^TestHelperClaimRunState$")
+	claim.Env = append(os.Environ(), claimHelperDir+"="+root, claimHelperDir+"_SCOPE="+scope, claimHelperDir+"_SERVER="+pidFile)
+	if killedRun {
+		claim.Env = append(claim.Env, claimHelperDir+"_LAUNCHER=1")
+	}
+	out, err := claim.CombinedOutput()
+	require.NoError(t, err, string(out))
+	data, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(string(data))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	require.True(t, processRuns(pid), "the server the agent left never ran")
+	return root, pid
+}
+
+func processRuns(pid int) bool {
+	_, err := runners.InspectProcess(pid)
+	return !errors.Is(err, runners.ErrProcessNotFound)
+}
+
+// TestAbandonedDisposableRunsServerIsStopped: a killed run leaves its server
+// running, and a root is in use for as long as that server runs. The next
+// agent to initialize stops the server such a run tracked on its root and
+// removes the root, when the run was disposable and is gone, and only then.
+func TestAbandonedDisposableRunsServerIsStopped(t *testing.T) {
+	cache := t.TempDir()
+	killed, killedServer := abandonedServer(t, cache, "killed", "invkilled", true)
+	persistent, persistentServer := abandonedServer(t, cache, "persistent", "", true)
+	// The agent died; the run that launched it (this test) goes on.
+	running, runningServer := abandonedServer(t, cache, "running", "invrunning", false)
+
+	collectAbandonedRunState(cache, filepath.Join(cache, "self"))
+
+	require.Eventually(t, func() bool { return !processRuns(killedServer) }, 5*time.Second, 50*time.Millisecond,
+		"the server a killed disposable run left is still running")
+	require.NoDirExists(t, killed)
+	require.True(t, processRuns(persistentServer), "a developer's server is theirs to stop")
+	require.DirExists(t, persistent)
+	require.True(t, processRuns(runningServer), "a run that goes on keeps its server")
+	require.DirExists(t, running)
 }
 
 // abandonedRoot is the runtime root of a run whose agent is gone.
@@ -316,6 +388,10 @@ func TestRuntimeRootIsWithinTheSweepOfCodeflyClear(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	// The layout on a developer's machine, not this suite's own store.
+	suite := redisCacheRoot
+	redisCacheRoot = machineRedisCacheRoot
+	t.Cleanup(func() { redisCacheRoot = suite })
 	root, err := runstate.Root()
 	require.NoError(t, err)
 	runtimeRoot, err := redisRuntimeRoot(redisStateKey("/work/shop/redis", "invkilled"))

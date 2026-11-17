@@ -11,15 +11,34 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/codefly-dev/core/wool"
 )
 
+// machineRedisCacheRoot is where the agent keeps native state outside this
+// suite.
+var machineRedisCacheRoot = redisCacheRoot
+
 func TestMain(m *testing.M) {
 	wool.SetRethrowAfterCatch(true)
-	os.Exit(m.Run())
+	os.Exit(func() int {
+		// Native state of this suite lives under the suite's own directory,
+		// never beside a developer's real runs: an agent that initializes
+		// stops the servers killed runs left in its store, and removes their
+		// roots.
+		dir, err := os.MkdirTemp("", "service-redis-test-*")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer os.RemoveAll(dir)
+		redisCacheRoot = func() (string, error) { return filepath.Join(dir, "codefly", "redis"), nil }
+		return m.Run()
+	}())
 }
 
 // A panic inside an agent method must reach the test, as it reaches the host in

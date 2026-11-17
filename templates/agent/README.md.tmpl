@@ -77,9 +77,13 @@ agent. Its native state (one directory per server under the user cache
 directory, `codefly/redis/`, a replica's included) is removed when the run
 ends: by the run itself once it has stopped its services, by the service when
 it is destroyed, or, when the run was killed, by the next Redis service to
-start on the machine or by `codefly clear`. A server still running keeps its
-directory until it is stopped. A plain run, and a run under a naming scope you
-named, is never disposable: its data is retained through every operation.
+start on the machine or by `codefly clear`. A killed run also leaves its server
+running, and a server still running keeps its directory: both stop it first,
+and only it (the process the run's agent recorded on that directory, checked
+against its recorded start before it is signalled, and only once the run that
+launched the agent is gone). A plain run, and a run under a naming scope you
+named, is never disposable: its data is retained through every operation, and
+its server is never stopped for it.
 
 The native runner records Core's stable boot-session and process-birth identity.
 It also carries the current launching workspace through Nix materialization

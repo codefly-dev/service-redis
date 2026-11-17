@@ -36,7 +36,6 @@ package main
 // shared with every native store.
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	_ "embed"
@@ -45,7 +44,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,14 +252,20 @@ func disposeRunState(runtimeRoot string, state *runstate.Hold) (bool, error) {
 	return runstate.Collect(runtimeRoot)
 }
 
-// collectAbandonedRunState removes every other runtime root on this machine
+// collectAbandonedRunState takes back every other runtime root on this machine
 // that a disposable run left behind without destroying its agent: a run that
-// was killed. runstate.Collect decides, and removes only a root every claimant
-// declared disposable and that no live agent or server uses; a root nobody
-// claimed (it predates the record, or is the shared nix root) is never
-// touched. A root whose lock is taken is in use right now and is left alone.
+// was killed. Such a run also leaves its server running, which keeps the root
+// in use for good, so the server is stopped first (redis shuts down on
+// SIGTERM) and the root then removed. Core decides both (runstate.StopAbandoned,
+// runstate.Collect): only a root every claimant declared disposable, whose
+// runs are gone, and only the process its agent recorded there, checked
+// against its recorded birth before each signal. A developer's root and its
+// server, a root a live agent uses, and a root nobody claimed (it predates the
+// record, or is the shared nix root) are never touched. A root whose lock is
+// taken is in use right now and is left alone.
 //
-// Best effort: this reclaims disk, and a start must not fail over it.
+// Best effort: this reclaims what a killed run left, and a start must not
+// fail over it.
 func collectAbandonedRunState(cache, self string) {
 	entries, err := os.ReadDir(cache)
 	if err != nil {
@@ -277,7 +281,9 @@ func collectAbandonedRunState(cache, self string) {
 		}
 		lock := flock.New(filepath.Join(root, ownerLockName), flock.SetPermissions(0o600))
 		if held, err := lock.TryLock(); err == nil && held {
-			_, _ = runstate.Collect(root)
+			if _, err := runstate.StopAbandoned(context.Background(), root, runstate.StopOptions{}); err == nil {
+				_, _ = runstate.Collect(root)
+			}
 			_ = lock.Unlock()
 		}
 		_ = lock.Close()
@@ -364,7 +370,9 @@ func redisRuntimeRoot(stateKey string) (string, error) {
 	return filepath.Join(cache, redisServiceHash(stateKey)[:16]), nil
 }
 
-func redisCacheRoot() (string, error) {
+// redisCacheRoot is the machine directory holding every runtime root and the
+// shared nix root. Tests point it elsewhere.
+var redisCacheRoot = func() (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		cache = os.TempDir()
@@ -578,18 +586,20 @@ func (n *nixRedis) Init(ctx context.Context) (err error) {
 	replicas := n.replicas
 	n.mu.Unlock()
 	for i, replica := range replicas {
-		if err := replica.initReplica(ctx, n.serverPath); err != nil {
+		if err := replica.initReplica(ctx, n.env, n.serverPath); err != nil {
 			return fmt.Errorf("redis replica %d: %w", i+1, err)
 		}
 	}
 	return nil
 }
 
-// initReplica starts a replica off the primary's already resolved server:
-// resolving it again would evaluate the shared flake once more for the same
-// answer.
-func (n *nixRedis) initReplica(ctx context.Context, serverPath string) error {
-	n.serverPath = serverPath
+// initReplica starts a replica off the primary's already materialized
+// environment and resolved server: doing either again would evaluate the
+// shared flake once more for the same answer, and a replica started from an
+// environment that was never materialized runs under a `nix develop` wrapper,
+// so the process this agent started would not be the server.
+func (n *nixRedis) initReplica(ctx context.Context, env redisRunner, serverPath string) error {
+	n.env, n.serverPath = env, serverPath
 	if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
 		return fmt.Errorf("create redis data dir: %w", err)
 	}
@@ -622,33 +632,29 @@ func (n *nixRedis) launch(ctx context.Context) (err error) {
 	if readyErr := n.waitReady(ctx); readyErr != nil {
 		return readyErr
 	}
-	return n.trackServer(ctx)
+	return n.trackServer()
 }
 
 // trackServer records the running server on this agent's claim. The server is
 // in its own process group and outlives an agent that is killed: while it
-// runs, its root is in use whoever else is gone. The pid is the server's own
-// answer (INFO server), over the handshake readiness just proved.
-func (n *nixRedis) trackServer(ctx context.Context) error {
+// runs, its root is in use whoever else is gone. It is the process this agent
+// started, so the handle the agent holds says which it is.
+func (n *nixRedis) trackServer() error {
 	if n.state == nil {
 		return nil
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", n.port)
-	var pid int
-	err := withRedisHandshake(ctx, addr, n.password, func(conn net.Conn, reader *bufio.Reader) error {
-		info, err := redisInfo(ctx, conn, reader, addr, "server")
-		if err != nil {
-			return err
-		}
-		if pid, err = strconv.Atoi(info["process_id"]); err != nil {
-			return fmt.Errorf("redis on %s reports no process id: %w", addr, err)
-		}
-		return nil
-	})
+	n.mu.Lock()
+	proc := n.proc
+	n.mu.Unlock()
+	host, ok := proc.(runners.HostProcess)
+	if !ok {
+		return errors.New("the redis server was not started as a process of this machine")
+	}
+	server, err := host.Process()
 	if err != nil {
 		return fmt.Errorf("identify the redis server process: %w", err)
 	}
-	return n.state.Track(pid)
+	return n.state.Track(server.PID)
 }
 
 // initSharedEnv materializes the shared nix env and resolves redis-server out

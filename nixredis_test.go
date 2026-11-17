@@ -31,6 +31,10 @@ func TestRedisStateKeyPreservesLegacyUnscopedLocation(t *testing.T) {
 	sum := sha256.Sum256([]byte(testServiceLocation))
 	legacy := filepath.Join(cache, "codefly", "redis", hex.EncodeToString(sum[:])[:16])
 
+	// The location on a developer's machine, not this suite's own store.
+	suite := redisCacheRoot
+	redisCacheRoot = machineRedisCacheRoot
+	t.Cleanup(func() { redisCacheRoot = suite })
 	root, err := redisRuntimeRoot(redisStateKey(testServiceLocation, ""))
 	if err != nil {
 		t.Fatal(err)
