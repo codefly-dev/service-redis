@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,16 +169,17 @@ func TestRealRedisCacheOverCluster(t *testing.T) {
 		for i := range 64 {
 			mustCache(t, layer.Set(ctx, fmt.Sprint("spread-", i), cacheiface.Entry{Value: []byte("v")}, time.Minute))
 		}
-		holding := 0
+		// ForEachMaster asks every primary at once, each from its own goroutine.
+		var holding atomic.Int64
 		mustCache(t, client.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
 			n, err := node.DBSize(ctx).Result()
 			if n > 0 {
-				holding++
+				holding.Add(1)
 			}
 			return err
 		}))
-		if holding < 2 {
-			t.Fatalf("keys landed on %d of %d primaries", holding, clusterNodes)
+		if holding.Load() < 2 {
+			t.Fatalf("keys landed on %d of %d primaries", holding.Load(), clusterNodes)
 		}
 	})
 }
