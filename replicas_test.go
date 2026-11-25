@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
@@ -49,10 +49,10 @@ func TestReplicaCount(t *testing.T) {
 
 func TestResolveTCPEndpointsBindsReplicasToTheReadEndpoint(t *testing.T) {
 	ctx := context.Background()
-	read, write, other := &basev0.Endpoint{Name: "read", Api: "tcp"}, &basev0.Endpoint{Name: "write", Api: "tcp"}, &basev0.Endpoint{Name: "analytics", Api: "tcp"}
+	read, write, other := &basev1.Endpoint{Name: "read", Api: "tcp"}, &basev1.Endpoint{Name: "write", Api: "tcp"}, &basev1.Endpoint{Name: "analytics", Api: "tcp"}
 
 	svc := NewService()
-	if err := svc.resolveTCPEndpoints(ctx, []*basev0.Endpoint{other, read, write}); err != nil {
+	if err := svc.resolveTCPEndpoints(ctx, []*basev1.Endpoint{other, read, write}); err != nil {
 		t.Fatal(err)
 	}
 	if svc.TcpEndpoint != write || svc.ReadEndpoint != nil {
@@ -60,7 +60,7 @@ func TestResolveTCPEndpointsBindsReplicasToTheReadEndpoint(t *testing.T) {
 	}
 
 	svc.WithReadReplicas = true
-	if err := svc.resolveTCPEndpoints(ctx, []*basev0.Endpoint{other, read, write}); err != nil {
+	if err := svc.resolveTCPEndpoints(ctx, []*basev1.Endpoint{other, read, write}); err != nil {
 		t.Fatal(err)
 	}
 	if svc.TcpEndpoint != write || svc.ReadEndpoint != read {
@@ -68,12 +68,12 @@ func TestResolveTCPEndpointsBindsReplicasToTheReadEndpoint(t *testing.T) {
 	}
 
 	// No endpoint named read: the first other TCP endpoint serves the replicas.
-	if err := svc.resolveTCPEndpoints(ctx, []*basev0.Endpoint{other, write}); err != nil || svc.ReadEndpoint != other {
+	if err := svc.resolveTCPEndpoints(ctx, []*basev1.Endpoint{other, write}); err != nil || svc.ReadEndpoint != other {
 		t.Fatalf("replica endpoint = %v, %v; want analytics", svc.ReadEndpoint, err)
 	}
 
 	// Replicas with nothing to serve are refused rather than run unreachable.
-	if err := svc.resolveTCPEndpoints(ctx, []*basev0.Endpoint{write}); err == nil {
+	if err := svc.resolveTCPEndpoints(ctx, []*basev1.Endpoint{write}); err == nil {
 		t.Fatal("with-read-replicas accepted on a service with a single TCP endpoint")
 	}
 }
@@ -81,21 +81,21 @@ func TestResolveTCPEndpointsBindsReplicasToTheReadEndpoint(t *testing.T) {
 func TestRedisRuntimeMappingsRouteAliasesToReplicas(t *testing.T) {
 	read, write := proposedRedisMapping("read", 16001), proposedRedisMapping("write", 16002)
 	analytics := proposedRedisMapping("analytics", 16003)
-	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write, analytics}, write.Endpoint, read.Endpoint)
+	accepted, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{read, write, analytics}, write.Endpoint, read.Endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, want := range []*basev0.NetworkMapping{read, write, read} {
+	for i, want := range []*basev1.NetworkMapping{read, write, read} {
 		for j, instance := range accepted[i].GetInstances() {
 			if !proto.Equal(instance, want.Instances[j]) {
 				t.Errorf("%s resolves to %s, want %s's %s", accepted[i].GetEndpoint().GetName(), instance.GetAddress(), want.GetEndpoint().GetName(), want.Instances[j].GetAddress())
 			}
 		}
 	}
-	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint, write.Endpoint); err == nil {
+	if _, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{read, write}, write.Endpoint, write.Endpoint); err == nil {
 		t.Fatal("replicas accepted on the primary's own endpoint")
 	}
-	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{write}, write.Endpoint, read.Endpoint); err == nil {
+	if _, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{write}, write.Endpoint, read.Endpoint); err == nil {
 		t.Fatal("replicas accepted without a mapping for their endpoint")
 	}
 }
@@ -230,36 +230,36 @@ func parseStatefulSets(t *testing.T, destination string) []renderedStatefulSet {
 // replicaDeployment deploys a read/write service with replicas and returns the
 // response and where it rendered. restricted selects the restricted profile,
 // with a password Secret reference.
-func replicaDeployment(t *testing.T, replicas int, restricted bool) (*Builder, *builderv0.DeploymentResponse, string) {
+func replicaDeployment(t *testing.T, replicas int, restricted bool) (*Builder, *builderv1.DeploymentResponse, string) {
 	t.Helper()
 	useSuccessfulKubectl(t)
 	builder, _ := newDeploymentTestBuilder(t)
 	read := deploymentAliasMapping(builder, "read", 16001)
 	write := deploymentAliasMapping(builder, "write", 16002)
 	builder.WithReadReplicas, builder.ReadReplicas = true, replicas
-	if err := builder.resolveTCPEndpoints(context.Background(), []*basev0.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
+	if err := builder.resolveTCPEndpoints(context.Background(), []*basev1.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
 		t.Fatal(err)
 	}
 	destination := t.TempDir()
-	request := restrictedDeploymentRequest(destination, []*basev0.NetworkMapping{read, write}, nil, false)
+	request := restrictedDeploymentRequest(destination, []*basev1.NetworkMapping{read, write}, nil, false)
 	if restricted {
 		builder.RequirePass = true
 		key := resources.ServiceSecretConfigurationKeyFromUnique(builder.Unique(), "redis", "REDIS_PASSWORD")
-		request.GetDeployment().GetKubernetes().SecretReferences = map[string]*builderv0.KubernetesSecretKeyReference{
+		request.GetDeployment().GetKubernetes().SecretReferences = map[string]*builderv1.KubernetesSecretKeyReference{
 			key: {Name: "redis-credentials", Key: "password"},
 		}
 	} else {
-		request.GetDeployment().GetKubernetes().Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
-		request.Configuration = &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+		request.GetDeployment().GetKubernetes().Profile = builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
+		request.Configuration = &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 			Name:                "redis",
-			ConfigurationValues: []*basev0.ConfigurationValue{{Key: "REDIS_PASSWORD", Value: "deploy-secret", Secret: true}},
+			ConfigurationValues: []*basev1.ConfigurationValue{{Key: "REDIS_PASSWORD", Value: "deploy-secret", Secret: true}},
 		}}}
 	}
 	response, err := builder.Deploy(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
 	}
 	return builder, response, destination
@@ -267,7 +267,7 @@ func replicaDeployment(t *testing.T, replicas int, restricted bool) (*Builder, *
 
 func TestDeploymentRendersPrimaryAndReplicas(t *testing.T) {
 	_, response, destination := replicaDeployment(t, 3, true)
-	if v := response.GetDeployment().GetKubernetes().GetValidation(); v.GetStaticValidation() != builderv0.KubernetesManifestValidation_STATUS_PASSED {
+	if v := response.GetDeployment().GetKubernetes().GetValidation(); v.GetStaticValidation() != builderv1.KubernetesManifestValidation_STATUS_PASSED {
 		t.Fatalf("restricted output with replicas fails static validation: %v", v.GetViolations())
 	}
 
@@ -331,7 +331,7 @@ func TestDeploymentRendersPrimaryAndReplicas(t *testing.T) {
 	}
 
 	// The restricted output names both connections, and carries neither value.
-	values := map[string]*basev0.ConfigurationValue{}
+	values := map[string]*basev1.ConfigurationValue{}
 	for _, v := range response.GetConfiguration().GetInfos()[0].GetConfigurationValues() {
 		values[v.GetKey()] = v
 	}
@@ -373,14 +373,14 @@ func TestDeploymentReplicasNeedTheirOwnPort(t *testing.T) {
 	read := deploymentAliasMapping(builder, "read", 6379)
 	write := deploymentAliasMapping(builder, "write", 6379)
 	builder.WithReadReplicas = true
-	if err := builder.resolveTCPEndpoints(context.Background(), []*basev0.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
+	if err := builder.resolveTCPEndpoints(context.Background(), []*basev1.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
 		t.Fatal(err)
 	}
-	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(t.TempDir(), []*basev0.NetworkMapping{read, write}, nil, false))
+	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(t.TempDir(), []*basev1.NetworkMapping{read, write}, nil, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_ERROR || !strings.Contains(response.GetState().GetMessage(), "each needs its own port") {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_ERROR || !strings.Contains(response.GetState().GetMessage(), "each needs its own port") {
 		t.Fatalf("deployment = %s (%s); want the shared port refused", response.GetState().GetState(), response.GetState().GetMessage())
 	}
 }

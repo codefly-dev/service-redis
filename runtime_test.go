@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 )
 
@@ -28,7 +28,7 @@ func newReadinessRuntime(t *testing.T, nativePort uint16) *Runtime {
 	deadListener.Close()
 
 	rt := NewRuntime()
-	if err = rt.HeadlessLoad(context.Background(), &basev0.ServiceIdentity{
+	if err = rt.HeadlessLoad(context.Background(), &basev1.ServiceIdentity{
 		Workspace: "workspace",
 		Module:    "module",
 		Name:      "redis",
@@ -38,7 +38,7 @@ func newReadinessRuntime(t *testing.T, nativePort uint16) *Runtime {
 	}
 	rt.Runtime.WithContext(resources.NewRuntimeContextContainer())
 
-	rt.TcpEndpoint = &basev0.Endpoint{Name: "tcp", Module: "module", Service: "redis", Api: "tcp"}
+	rt.TcpEndpoint = &basev1.Endpoint{Name: "tcp", Module: "module", Service: "redis", Api: "tcp"}
 
 	// The container instance points at a port nothing listens on, so a probe
 	// that selected it would fail — only the native instance is reachable.
@@ -46,9 +46,9 @@ func newReadinessRuntime(t *testing.T, nativePort uint16) *Runtime {
 	native.Access = resources.NewNativeNetworkAccess()
 	container := resources.NewNetworkInstance("host.docker.internal", deadPort)
 	container.Access = resources.NewContainerNetworkAccess()
-	rt.NetworkMappings = []*basev0.NetworkMapping{{
+	rt.NetworkMappings = []*basev1.NetworkMapping{{
 		Endpoint:  rt.TcpEndpoint,
-		Instances: []*basev0.NetworkInstance{container, native},
+		Instances: []*basev1.NetworkInstance{container, native},
 	}}
 	return rt
 }

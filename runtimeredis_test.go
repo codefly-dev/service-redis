@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/runners/dockerrun"
@@ -38,8 +38,8 @@ var redisBackends = []redisBackend{dockerBackend, nixBackend}
 // runtimeRedis is a redis started through the Runtime contract.
 type runtimeRedis struct {
 	rt          *Runtime
-	init        *runtimev0.InitResponse
-	read, write *basev0.Endpoint
+	init        *runtimev1.InitResponse
+	read, write *basev1.Endpoint
 	password    string
 	// version is the redis_version the primary reports: the server this
 	// target actually ran on.
@@ -86,15 +86,15 @@ func startRuntimeRedis(t *testing.T, backend redisBackend, replicas int, passwor
 	unique := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 
 	rt := NewRuntime()
-	if err = rt.HeadlessLoad(ctx, &basev0.ServiceIdentity{
+	if err = rt.HeadlessLoad(ctx, &basev1.ServiceIdentity{
 		Workspace: "redis-runtime-" + unique, Module: "module", Name: "redis", Version: "1.0.0",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// Its own naming scope gives the native runtime its own state roots.
-	rt.Runtime.SetEnvironment(&basev0.Environment{Name: "local", NamingScope: "test-" + unique})
+	rt.Runtime.SetEnvironment(&basev1.Environment{Name: "local", NamingScope: "test-" + unique})
 	rt.WithReadReplicas, rt.ReadReplicas = replicas > 0, replicas
-	if err = rt.resolveTCPEndpoints(ctx, []*basev0.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
+	if err = rt.resolveTCPEndpoints(ctx, []*basev1.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
 		t.Fatal(err)
 	}
 	rt.Password, rt.RequirePass = password, password != ""
@@ -106,7 +106,7 @@ func startRuntimeRedis(t *testing.T, backend redisBackend, replicas int, passwor
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
 		defer stop()
-		if response, err := rt.Destroy(cleanup, &runtimev0.DestroyRequest{}); err != nil || response.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+		if response, err := rt.Destroy(cleanup, &runtimev1.DestroyRequest{}); err != nil || response.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS {
 			t.Errorf("Destroy: %v, %v", response, err)
 		}
 		if backend == nixBackend {
@@ -123,15 +123,15 @@ func startRuntimeRedis(t *testing.T, backend redisBackend, replicas int, passwor
 		}
 	})
 
-	init, err := rt.Init(ctx, &runtimev0.InitRequest{
+	init, err := rt.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          runtimeContext,
-		ProposedNetworkMappings: []*basev0.NetworkMapping{read, write},
+		ProposedNetworkMappings: []*basev1.NetworkMapping{read, write},
 	})
-	if err != nil || init.GetStatus().GetState() != runtimev0.InitStatus_READY {
+	if err != nil || init.GetStatus().GetState() != runtimev1.InitStatus_READY {
 		t.Fatalf("Init over %s: %v, %v", backend, init.GetStatus(), err)
 	}
-	started, err := rt.Start(ctx, &runtimev0.StartRequest{})
-	if err != nil || started.GetStatus().GetState() != runtimev0.StartStatus_STARTED {
+	started, err := rt.Start(ctx, &runtimev1.StartRequest{})
+	if err != nil || started.GetStatus().GetState() != runtimev1.StartStatus_STARTED {
 		t.Fatalf("Start over %s: %v, %v", backend, started.GetStatus(), err)
 	}
 	r := &runtimeRedis{rt: rt, init: init, read: read.Endpoint, write: write.Endpoint, password: password}
@@ -143,7 +143,7 @@ func startRuntimeRedis(t *testing.T, backend redisBackend, replicas int, passwor
 }
 
 // address is where a consumer on this host reaches endpoint, as Init mapped it.
-func (r *runtimeRedis) address(t *testing.T, endpoint *basev0.Endpoint) string {
+func (r *runtimeRedis) address(t *testing.T, endpoint *basev1.Endpoint) string {
 	t.Helper()
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(context.Background(), r.init.GetNetworkMappings(), endpoint, resources.NewNativeNetworkAccess())
 	if err != nil {

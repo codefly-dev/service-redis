@@ -16,8 +16,8 @@ import (
 	"github.com/codefly-dev/core/agents/contract"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
 	"github.com/codefly-dev/core/resources"
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/shared"
@@ -142,14 +142,14 @@ type Service struct {
 
 	redisPassword string
 
-	TcpEndpoint *basev0.Endpoint
+	TcpEndpoint *basev1.Endpoint
 	// ReadEndpoint is the TCP endpoint the replicas serve when the service has
 	// read replicas, and nil otherwise. Every TCP alias other than TcpEndpoint
 	// resolves to the same replicas.
-	ReadEndpoint *basev0.Endpoint
+	ReadEndpoint *basev1.Endpoint
 }
 
-func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
+func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv1.AgentInformationRequest) (*agentv1.AgentInformation, error) {
 
 	readme, err := templates.ApplyTemplateFrom(ctx, shared.Embed(readmeFS), "templates/agent/README.md", s.Information)
 	if err != nil {
@@ -162,17 +162,17 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 			Docker: true,
 		},
 		ReadMe: readme,
-		Config: []*agentv0.ConfigurationValueDetail{
+		Config: []*agentv1.ConfigurationValueDetail{
 			{
 				Name: "redis", Description: "redis connection details",
-				Fields: []*agentv0.ConfigurationValueInformation{
+				Fields: []*agentv1.ConfigurationValueInformation{
 					{Name: "connection", Description: "connection string"},
 					{Name: readConnectionKey, Description: "connection string of the read replicas; only with with-read-replicas"},
 				},
 			},
 			{
 				Name: cacheiface.Group, Description: "codefly.dev/cache provider: open with cache.Open and the driver github.com/codefly-dev/service-redis/cache",
-				Fields: []*agentv0.ConfigurationValueInformation{
+				Fields: []*agentv1.ConfigurationValueInformation{
 					{Name: cacheiface.KeyDriver, Description: "driver name, always " + rediscache.DriverName},
 					{Name: cacheiface.KeyConnection, Description: "connection string"},
 				},
@@ -192,7 +192,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 // Core's FindTCPEndpoint rejects as ambiguous, so prefer the write endpoint when
 // present and otherwise fall back to the first declared TCP endpoint. Without
 // read replicas every other alias is served by the same process.
-func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) (*basev0.Endpoint, error) {
+func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev1.Endpoint) (*basev1.Endpoint, error) {
 	tcp := resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints)
 	switch len(tcp) {
 	case 0:
@@ -212,8 +212,8 @@ func resolveServingTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint
 // when declared, otherwise the first TCP endpoint that is not the serving one.
 // Replicas with no endpoint of their own would be unreachable, so that is an
 // error rather than a topology that quietly serves nothing.
-func resolveReplicaTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint, serving *basev0.Endpoint) (*basev0.Endpoint, error) {
-	var candidates []*basev0.Endpoint
+func resolveReplicaTCPEndpoint(ctx context.Context, endpoints []*basev1.Endpoint, serving *basev1.Endpoint) (*basev1.Endpoint, error) {
+	var candidates []*basev1.Endpoint
 	for _, endpoint := range resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints) {
 		if endpoint.Name == serving.GetName() {
 			continue
@@ -232,7 +232,7 @@ func resolveReplicaTCPEndpoint(ctx context.Context, endpoints []*basev0.Endpoint
 // resolveTCPEndpoints binds the serving endpoint and, when the settings ask for
 // replicas, the endpoint they serve. Load runs it for the runtime and the
 // builder alike, so both render the same topology.
-func (s *Service) resolveTCPEndpoints(ctx context.Context, endpoints []*basev0.Endpoint) error {
+func (s *Service) resolveTCPEndpoints(ctx context.Context, endpoints []*basev1.Endpoint) error {
 	serving, err := resolveServingTCPEndpoint(ctx, endpoints)
 	if err != nil {
 		return err
@@ -254,7 +254,7 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configuration) error {
+func (s *Service) LoadConfiguration(ctx context.Context, conf *basev1.Configuration) error {
 	// Runtime configuration has highest precedence; service.codefly.yaml's
 	// password is the local/default fallback. Previously Password and
 	// RequirePass parsed successfully but were never read in production.
@@ -283,7 +283,7 @@ func (s *Service) createConnectionString(_ context.Context, address string) stri
 	return fmt.Sprintf("redis://%s", address)
 }
 
-func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev0.Configuration, instance *basev0.NetworkInstance) (*basev0.Configuration, error) {
+func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev1.Configuration, instance *basev1.NetworkInstance) (*basev1.Configuration, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -294,12 +294,12 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 
 	connection := s.createConnectionString(ctx, instance.Address)
 
-	outputConf := &basev0.Configuration{
+	outputConf := &basev1.Configuration{
 		Origin:         s.Base.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
-		Infos: []*basev0.ConfigurationInformation{
+		Infos: []*basev1.ConfigurationInformation{
 			{Name: "redis",
-				ConfigurationValues: []*basev0.ConfigurationValue{
+				ConfigurationValues: []*basev1.ConfigurationValue{
 					{Key: "connection", Value: connection, Secret: true},
 				},
 			},
@@ -316,8 +316,8 @@ const readConnectionKey = "read-connection"
 // addReadConnection records the replicas' connection string for readInstance in
 // the redis group of conf, which CreateConnectionConfiguration built for the
 // primary's matching access view.
-func (s *Service) addReadConnection(conf *basev0.Configuration, readInstance *basev0.NetworkInstance) {
-	value := &basev0.ConfigurationValue{Key: readConnectionKey, Secret: true}
+func (s *Service) addReadConnection(conf *basev1.Configuration, readInstance *basev1.NetworkInstance) {
+	value := &basev1.ConfigurationValue{Key: readConnectionKey, Secret: true}
 	if readInstance != nil {
 		value.Value = s.createConnectionString(context.Background(), readInstance.Address)
 	}
@@ -331,14 +331,14 @@ func (s *Service) addReadConnection(conf *basev0.Configuration, readInstance *ba
 
 // restrictedConnectionConfiguration carries value-free secret references only.
 // withReplicas adds the replicas' reference beside the primary's.
-func (s *Service) restrictedConnectionConfiguration(instance *basev0.NetworkInstance, withReplicas bool) *basev0.Configuration {
-	conf := &basev0.Configuration{
+func (s *Service) restrictedConnectionConfiguration(instance *basev1.NetworkInstance, withReplicas bool) *basev1.Configuration {
+	conf := &basev1.Configuration{
 		Origin:         s.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
-		Infos: []*basev0.ConfigurationInformation{
+		Infos: []*basev1.ConfigurationInformation{
 			{
 				Name: "redis",
-				ConfigurationValues: []*basev0.ConfigurationValue{
+				ConfigurationValues: []*basev1.ConfigurationValue{
 					{Key: "connection", Secret: true},
 				},
 			},
@@ -356,10 +356,10 @@ func (s *Service) restrictedConnectionConfiguration(instance *basev0.NetworkInst
 // driver this repository ships (./cache) and the same connection as the redis
 // group. An empty connection is the value-free secret reference restricted
 // deployments return.
-func cacheConfiguration(connection string) *basev0.ConfigurationInformation {
-	return &basev0.ConfigurationInformation{
+func cacheConfiguration(connection string) *basev1.ConfigurationInformation {
+	return &basev1.ConfigurationInformation{
 		Name: cacheiface.Group,
-		ConfigurationValues: []*basev0.ConfigurationValue{
+		ConfigurationValues: []*basev1.ConfigurationValue{
 			{Key: cacheiface.KeyDriver, Value: rediscache.DriverName},
 			{Key: cacheiface.KeyConnection, Value: connection, Secret: true},
 		},

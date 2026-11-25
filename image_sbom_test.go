@@ -19,8 +19,8 @@ import (
 	"testing"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 )
 
 func requireImageSBOMInfrastructure(t *testing.T, missing string) {
@@ -54,7 +54,7 @@ func imageSBOMBuilder(t *testing.T) *Builder {
 
 // expectedRuntimeSubjects derives coverage expectations from the lock file
 // rather than from the enumeration under test, so the two can disagree.
-func expectedRuntimeSubjects(t *testing.T, service string) []*builderv0.ImageSubject {
+func expectedRuntimeSubjects(t *testing.T, service string) []*builderv1.ImageSubject {
 	t.Helper()
 	content, err := os.ReadFile("runtime-image.json")
 	if err != nil {
@@ -64,9 +64,9 @@ func expectedRuntimeSubjects(t *testing.T, service string) []*builderv0.ImageSub
 	if err != nil {
 		t.Fatalf("parseRuntimeImageLock: %v", err)
 	}
-	var subjects []*builderv0.ImageSubject
+	var subjects []*builderv1.ImageSubject
 	for _, platform := range lock.Platforms {
-		subjects = append(subjects, &builderv0.ImageSubject{
+		subjects = append(subjects, &builderv1.ImageSubject{
 			Reference: lock.FullName(),
 			Platform:  platform,
 			Role:      runtimeImageRole,
@@ -113,8 +113,8 @@ func TestRuntimeImageSubjectsCoverEveryShippedPlatform(t *testing.T) {
 func TestImageScopeWithoutLoadReportsAnError(t *testing.T) {
 	builder := NewBuilder()
 
-	response, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{
-		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+	response, err := builder.SBOM(context.Background(), &builderv1.SBOMRequest{
+		Scope: builderv1.SBOMScope_SBOM_SCOPE_IMAGE,
 	})
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
@@ -122,10 +122,10 @@ func TestImageScopeWithoutLoadReportsAnError(t *testing.T) {
 	if response == nil {
 		t.Fatal("SBOM returned no response")
 	}
-	if state := response.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+	if state := response.GetState().GetState(); state != builderv1.SBOMStatus_ERROR {
 		t.Fatalf("state = %s, want ERROR", state)
 	}
-	if response.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if response.GetScope() != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Fatalf("scope = %s, want image", response.GetScope())
 	}
 	if len(response.GetImages()) != 0 {
@@ -140,9 +140,9 @@ func TestNoImageClaimFailsCoverageForAShippedImage(t *testing.T) {
 	builder := imageSBOMBuilder(t)
 	expected := expectedRuntimeSubjects(t, builder.Unique())
 
-	for _, reason := range []builderv0.NoImageReason{
-		builderv0.NoImageReason_NO_IMAGE_REASON_NO_IMAGE,
-		builderv0.NoImageReason_NO_IMAGE_REASON_EXTERNALLY_MANAGED,
+	for _, reason := range []builderv1.NoImageReason{
+		builderv1.NoImageReason_NO_IMAGE_REASON_NO_IMAGE,
+		builderv1.NoImageReason_NO_IMAGE_REASON_EXTERNALLY_MANAGED,
 	} {
 		response, err := builder.Builder.SBOMNoImage(reason, "redis ships no image")
 		if err != nil {
@@ -160,8 +160,8 @@ func TestSourceInventoryFailsImageCoverage(t *testing.T) {
 	builder := imageSBOMBuilder(t)
 	expected := expectedRuntimeSubjects(t, builder.Unique())
 
-	response, err := builder.Builder.SBOMResponse(&agentv0.Bom{
-		Components: []*agentv0.Component{{Name: "redis", Version: "8.8.0"}},
+	response, err := builder.Builder.SBOMResponse(&agentv1.Bom{
+		Components: []*agentv1.Component{{Name: "redis", Version: "8.8.0"}},
 	}, "syft", "DOCKER", "abc123")
 	if err != nil {
 		t.Fatalf("SBOMResponse: %v", err)
@@ -175,13 +175,13 @@ func TestEnumeratedSubjectsSatisfyCoverage(t *testing.T) {
 	builder := imageSBOMBuilder(t)
 	expected := expectedRuntimeSubjects(t, builder.Unique())
 
-	var evidence []*builderv0.ImageSBOM
+	var evidence []*builderv1.ImageSBOM
 	for i, subject := range builder.runtimeImageSubjects() {
-		evidence = append(evidence, &builderv0.ImageSBOM{
+		evidence = append(evidence, &builderv1.ImageSBOM{
 			Digest:   childDigest(i),
 			Platform: subject.GetPlatform(),
-			Subjects: []*builderv0.ImageSubject{subject},
-			Bom:      &agentv0.Bom{Components: []*agentv0.Component{{Name: "busybox", Version: "1.37.0-r30"}}},
+			Subjects: []*builderv1.ImageSubject{subject},
+			Bom:      &agentv1.Bom{Components: []*agentv1.Component{{Name: "busybox", Version: "1.37.0-r30"}}},
 			Tool:     "syft",
 			Sha256:   "deterministic",
 		})
@@ -214,14 +214,14 @@ func TestImageSBOMCoversEveryShippedPlatform(t *testing.T) {
 
 	builder := imageSBOMBuilder(t)
 	ctx := context.Background()
-	response, err := builder.SBOM(ctx, &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
+	response, err := builder.SBOM(ctx, &builderv1.SBOMRequest{Scope: builderv1.SBOMScope_SBOM_SCOPE_IMAGE})
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
 	}
-	if state := response.GetState().GetState(); state != builderv0.SBOMStatus_COMPLETE {
+	if state := response.GetState().GetState(); state != builderv1.SBOMStatus_COMPLETE {
 		t.Fatalf("state = %s: %s", state, response.GetState().GetMessage())
 	}
-	if response.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if response.GetScope() != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Fatalf("scope = %s, want image", response.GetScope())
 	}
 	if err := sbom.ValidateCoverage(builder.Unique(), expectedRuntimeSubjects(t, builder.Unique()), response); err != nil {
@@ -255,7 +255,7 @@ func TestImageSBOMCoversEveryShippedPlatform(t *testing.T) {
 // assertImageInventory checks the inventory describes the image rather than the
 // repository: OS packages and the installed redis server, neither of which any
 // source lockfile in this repository would produce.
-func assertImageInventory(t *testing.T, evidence *builderv0.ImageSBOM) {
+func assertImageInventory(t *testing.T, evidence *builderv1.ImageSBOM) {
 	t.Helper()
 	var osPackages, redis int
 	for _, component := range evidence.GetBom().GetComponents() {
@@ -293,9 +293,9 @@ func TestImageSBOMReportsAnUnshippedPlatformAsFailure(t *testing.T) {
 	requireDockerForImageSBOM(t)
 
 	builder := imageSBOMBuilder(t)
-	response, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{
-		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
-		Subjects: []*builderv0.ImageSubject{{
+	response, err := builder.SBOM(context.Background(), &builderv1.SBOMRequest{
+		Scope: builderv1.SBOMScope_SBOM_SCOPE_IMAGE,
+		Subjects: []*builderv1.ImageSubject{{
 			Reference: image.FullName(),
 			Platform:  "linux/riscv64",
 			Role:      runtimeImageRole,
@@ -305,10 +305,10 @@ func TestImageSBOMReportsAnUnshippedPlatformAsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
 	}
-	if state := response.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+	if state := response.GetState().GetState(); state != builderv1.SBOMStatus_ERROR {
 		t.Fatalf("state = %s, want ERROR", state)
 	}
-	if response.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if response.GetScope() != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Fatalf("scope = %s, want image so the caller can tell which request failed", response.GetScope())
 	}
 	if len(response.GetImages()) != 0 {

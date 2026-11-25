@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/runners/runstate"
@@ -49,16 +49,16 @@ func claimedNativeRuntime(t *testing.T, run runstate.Run) (*Runtime, *nixRedis, 
 
 func stopRuntime(t *testing.T, rt *Runtime) {
 	t.Helper()
-	stopped, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	stopped, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StopStatus_SUCCESS, stopped.GetStatus().GetState(), stopped.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StopStatus_SUCCESS, stopped.GetStatus().GetState(), stopped.GetStatus().GetMessage())
 }
 
 func destroyRuntime(t *testing.T, rt *Runtime) {
 	t.Helper()
-	destroyed, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	destroyed, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_SUCCESS, destroyed.GetStatus().GetState(), destroyed.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.DestroyStatus_SUCCESS, destroyed.GetStatus().GetState(), destroyed.GetStatus().GetMessage())
 }
 
 // TestDisposableRunStateIsRemovedWhenTheRunDestroysIt: a run whose caller
@@ -98,9 +98,9 @@ func TestDisposableRunStateIsRemovedByDestroyWithoutStop(t *testing.T) {
 // no later collection, removes it.
 func TestPersistentRunStateIsNeverRemoved(t *testing.T) {
 	for name, run := range map[string]runstate.Run{
-		"plain run":    runstate.For("/work/shop", &basev0.Environment{Name: "local"}),
-		"named scope":  runstate.For("/work/shop", &basev0.Environment{Name: "local", NamingScope: "mine"}),
-		"no scope":     runstate.For("/work/shop", &basev0.Environment{Name: "local", Disposable: true}),
+		"plain run":    runstate.For("/work/shop", &basev1.Environment{Name: "local"}),
+		"named scope":  runstate.For("/work/shop", &basev1.Environment{Name: "local", NamingScope: "mine"}),
+		"no scope":     runstate.For("/work/shop", &basev1.Environment{Name: "local", Disposable: true}),
 		"no statement": runstate.For("/work/shop", nil),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -329,12 +329,12 @@ func TestRealRedisDisposableRunStateOverNix(t *testing.T) {
 	unique := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 
 	rt := NewRuntime()
-	require.NoError(t, rt.HeadlessLoad(ctx, &basev0.ServiceIdentity{
+	require.NoError(t, rt.HeadlessLoad(ctx, &basev1.ServiceIdentity{
 		Workspace: "redis-disposable-" + unique, Module: "module", Name: "redis", Version: "1.0.0",
 	}))
-	rt.Runtime.SetEnvironment(&basev0.Environment{Name: "local", NamingScope: "inv" + unique, Disposable: true})
+	rt.Runtime.SetEnvironment(&basev1.Environment{Name: "local", NamingScope: "inv" + unique, Disposable: true})
 	rt.WithReadReplicas, rt.ReadReplicas = true, 1
-	require.NoError(t, rt.resolveTCPEndpoints(ctx, []*basev0.Endpoint{read.Endpoint, write.Endpoint}))
+	require.NoError(t, rt.resolveTCPEndpoints(ctx, []*basev1.Endpoint{read.Endpoint, write.Endpoint}))
 
 	stateKey := redisStateKey(rt.Location, rt.Environment.GetNamingScope())
 	var roots []string
@@ -344,21 +344,21 @@ func TestRealRedisDisposableRunStateOverNix(t *testing.T) {
 		roots = append(roots, root)
 	}
 	t.Cleanup(func() {
-		_, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		_, _ = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 		for _, root := range roots {
 			_ = os.RemoveAll(root)
 		}
 	})
 
-	request := &runtimev0.InitRequest{
+	request := &runtimev1.InitRequest{
 		RuntimeContext:          resources.NewRuntimeContextNix(),
-		ProposedNetworkMappings: []*basev0.NetworkMapping{read, write},
+		ProposedNetworkMappings: []*basev1.NetworkMapping{read, write},
 	}
 	initialize := func() {
 		t.Helper()
 		init, err := rt.Init(ctx, request)
 		require.NoError(t, err)
-		require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+		require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 	}
 	initialize()
 	primary := rt.nativeRuntime()

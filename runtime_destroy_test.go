@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 )
 
 type failingDockerShutdown struct{ calls int }
@@ -24,23 +24,23 @@ func TestDockerDestroyRetainsAcquiredHandleOnFailure(t *testing.T) {
 	rt := NewRuntime()
 	acquired := &failingDockerShutdown{}
 	rt.runnerEnvironment = acquired
-	failed, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
-	if err == nil && failed.GetStatus().GetState() == runtimev0.DestroyStatus_SUCCESS {
+	failed, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
+	if err == nil && failed.GetStatus().GetState() == runtimev1.DestroyStatus_SUCCESS {
 		t.Fatal("failed removal reported success")
 	}
 	if rt.runnerEnvironment != acquired || acquired.calls != 1 {
 		t.Fatal("failed removal lost the acquired generation")
 	}
-	retried, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
-	if err != nil || retried.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS || acquired.calls != 2 {
+	retried, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
+	if err != nil || retried.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS || acquired.calls != 2 {
 		t.Fatalf("retry did not shut down the same acquired generation: %v, %v, calls=%d", retried, err, acquired.calls)
 	}
 }
 
 func TestDockerDestroyWithoutAcquiredHandleIsNoOp(t *testing.T) {
 	rt := NewRuntime()
-	response, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
-	if err != nil || response.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+	response, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
+	if err != nil || response.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS {
 		t.Fatalf("uninitialized Destroy: %v, %v", response, err)
 	}
 }
@@ -75,8 +75,8 @@ func TestDockerDestroyWaitsForAcquisitionAndInitialization(t *testing.T) {
 			<-acquired.entered
 			destroyed := make(chan error, 1)
 			go func() {
-				response, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
-				if err == nil && response.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+				response, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
+				if err == nil && response.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS {
 					err = errors.New("Destroy failed")
 				}
 				destroyed <- err

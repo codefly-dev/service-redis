@@ -4,14 +4,14 @@ import (
 	"context"
 	"testing"
 
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 )
 
 // The CLI verifies every agent before dispatching a build to a selected Buildx
 // builder (an environment that mirrors a registry builds on one of its own);
 // an agent that cannot answer fails the whole render.
 func TestBuildCapabilitiesHonourASelectedBuilder(t *testing.T) {
-	capabilities, err := NewBuilder().BuildCapabilities(context.Background(), &builderv0.BuildCapabilitiesRequest{})
+	capabilities, err := NewBuilder().BuildCapabilities(context.Background(), &builderv1.BuildCapabilitiesRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

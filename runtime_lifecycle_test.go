@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 )
 
 func newLoadedRuntime(t *testing.T) *Runtime {
 	t.Helper()
 	rt := NewRuntime()
-	if err := rt.HeadlessLoad(context.Background(), &basev0.ServiceIdentity{
+	if err := rt.HeadlessLoad(context.Background(), &basev1.ServiceIdentity{
 		Workspace: "workspace",
 		Module:    "module",
 		Name:      "redis",
@@ -33,16 +33,16 @@ func newLoadedRuntime(t *testing.T) *Runtime {
 // nixInitRequest is an Init request that resolves: a native mapping for the
 // runtime's own TCP endpoint. Tests that need Init to get past validation and
 // reach the backend it is about to build use this.
-func nixInitRequest(t *testing.T, rt *Runtime, port uint16) *runtimev0.InitRequest {
+func nixInitRequest(t *testing.T, rt *Runtime, port uint16) *runtimev1.InitRequest {
 	t.Helper()
-	rt.TcpEndpoint = &basev0.Endpoint{Name: "tcp", Module: "module", Service: "redis", Api: "tcp"}
+	rt.TcpEndpoint = &basev1.Endpoint{Name: "tcp", Module: "module", Service: "redis", Api: "tcp"}
 	native := resources.NewNetworkInstance("localhost", port)
 	native.Access = resources.NewNativeNetworkAccess()
-	return &runtimev0.InitRequest{
+	return &runtimev1.InitRequest{
 		RuntimeContext: resources.NewRuntimeContextNix(),
-		ProposedNetworkMappings: []*basev0.NetworkMapping{{
+		ProposedNetworkMappings: []*basev1.NetworkMapping{{
 			Endpoint:  rt.TcpEndpoint,
-			Instances: []*basev0.NetworkInstance{native},
+			Instances: []*basev1.NetworkInstance{native},
 		}},
 	}
 }
@@ -84,11 +84,11 @@ func TestRuntimeStopReleasesNativeRedis(t *testing.T) {
 	rt, n, port := startedNativeRuntime(t)
 	pid := ownedPID(t, n)
 
-	resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	resp, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.StopStatus_SUCCESS {
+	if state := resp.GetStatus().GetState(); state != runtimev1.StopStatus_SUCCESS {
 		t.Fatalf("Stop status = %v (%s)", state, resp.GetStatus().GetMessage())
 	}
 	requireProcessGone(t, pid)
@@ -98,11 +98,11 @@ func TestRuntimeStopReleasesNativeRedis(t *testing.T) {
 	}
 
 	// A second Stop has nothing to own and must still succeed.
-	resp, err = rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	resp, err = rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	if err != nil {
 		t.Fatalf("second Stop: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.StopStatus_SUCCESS {
+	if state := resp.GetStatus().GetState(); state != runtimev1.StopStatus_SUCCESS {
 		t.Fatalf("second Stop status = %v (%s)", state, resp.GetStatus().GetMessage())
 	}
 }
@@ -114,11 +114,11 @@ func TestRuntimeDestroyReleasesNativeRedisAndRepeats(t *testing.T) {
 	pid := ownedPID(t, n)
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		resp, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		resp, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 		if err != nil {
 			t.Fatalf("Destroy %d: %v", attempt, err)
 		}
-		if state := resp.GetStatus().GetState(); state != runtimev0.DestroyStatus_SUCCESS {
+		if state := resp.GetStatus().GetState(); state != runtimev1.DestroyStatus_SUCCESS {
 			t.Fatalf("Destroy %d status = %v (%s)", attempt, state, resp.GetStatus().GetMessage())
 		}
 	}
@@ -135,22 +135,22 @@ func TestRuntimeStopAndDestroyKeepOwnershipWhenTeardownFails(t *testing.T) {
 	rt := newLoadedRuntime(t)
 	rt.setNativeRuntime(&nixRedis{port: 6379, proc: stubborn{}})
 
-	stop, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	stop, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if state := stop.GetStatus().GetState(); state != runtimev0.StopStatus_ERROR {
+	if state := stop.GetStatus().GetState(); state != runtimev1.StopStatus_ERROR {
 		t.Fatalf("Stop status = %v, want ERROR", state)
 	}
 	if rt.nativeRuntime() == nil {
 		t.Fatal("Stop dropped ownership of a runtime it could not stop")
 	}
 
-	destroy, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	destroy, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if state := destroy.GetStatus().GetState(); state != runtimev0.DestroyStatus_ERROR {
+	if state := destroy.GetStatus().GetState(); state != runtimev1.DestroyStatus_ERROR {
 		t.Fatalf("Destroy status = %v, want ERROR", state)
 	}
 	if !strings.Contains(destroy.GetStatus().GetMessage(), stubbornStopMessage) {
@@ -175,7 +175,7 @@ func TestRuntimeSupervisionRevokesReadyOnUnexpectedExit(t *testing.T) {
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill redis: %v", err)
 	}
-	awaitStartState(t, rt, runtimev0.StartStatus_ERROR)
+	awaitStartState(t, rt, runtimev1.StartStatus_ERROR)
 }
 
 // TestRuntimeSupervisionIgnoresSupersededRuntime: the exit of a handle the
@@ -201,19 +201,19 @@ func TestRuntimeSupervisionIgnoresSupersededRuntime(t *testing.T) {
 	// Give the supervision goroutine room to misbehave before concluding it did
 	// not.
 	time.Sleep(500 * time.Millisecond)
-	requireStartState(t, rt, runtimev0.StartStatus_STARTED)
+	requireStartState(t, rt, runtimev1.StartStatus_STARTED)
 }
 
-func startState(t *testing.T, rt *Runtime) runtimev0.StartStatus_Status {
+func startState(t *testing.T, rt *Runtime) runtimev1.StartStatus_Status {
 	t.Helper()
-	info, err := rt.Information(context.Background(), &runtimev0.InformationRequest{})
+	info, err := rt.Information(context.Background(), &runtimev1.InformationRequest{})
 	if err != nil {
 		t.Fatalf("Information: %v", err)
 	}
 	return info.GetStartStatus().GetState()
 }
 
-func awaitStartState(t *testing.T, rt *Runtime, want runtimev0.StartStatus_Status) {
+func awaitStartState(t *testing.T, rt *Runtime, want runtimev1.StartStatus_Status) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -225,7 +225,7 @@ func awaitStartState(t *testing.T, rt *Runtime, want runtimev0.StartStatus_Statu
 	t.Fatalf("start status = %v, want %v", startState(t, rt), want)
 }
 
-func requireStartState(t *testing.T, rt *Runtime, want runtimev0.StartStatus_Status) {
+func requireStartState(t *testing.T, rt *Runtime, want runtimev1.StartStatus_Status) {
 	t.Helper()
 	if got := startState(t, rt); got != want {
 		t.Fatalf("start status = %v, want %v", got, want)
@@ -248,7 +248,7 @@ func TestRuntimeInitReleasesTheRuntimeItAlreadyOwns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
+	if state := resp.GetStatus().GetState(); state != runtimev1.InitStatus_ERROR {
 		t.Fatalf("Init status = %v, want ERROR", state)
 	}
 	requireProcessGone(t, pid)
@@ -269,7 +269,7 @@ func TestRuntimeInitKeepsOwnershipWhenReleaseFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
+	if state := resp.GetStatus().GetState(); state != runtimev1.InitStatus_ERROR {
 		t.Fatalf("Init status = %v, want ERROR", state)
 	}
 	if !strings.Contains(resp.GetStatus().GetMessage(), stubbornStopMessage) {
@@ -287,11 +287,11 @@ func TestRuntimeStopKeepsRedisRunningWhenAskedTo(t *testing.T) {
 	pid := ownedPID(t, n)
 	rt.Settings.KeepRunning = true
 
-	resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	resp, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.StopStatus_SUCCESS {
+	if state := resp.GetStatus().GetState(); state != runtimev1.StopStatus_SUCCESS {
 		t.Fatalf("Stop status = %v (%s)", state, resp.GetStatus().GetMessage())
 	}
 	if !processAlive(pid) {
@@ -304,7 +304,7 @@ func TestRuntimeStopKeepsRedisRunningWhenAskedTo(t *testing.T) {
 
 	// Clearing the opt-in releases it, so the test does not leak the server.
 	rt.Settings.KeepRunning = false
-	if _, err = rt.Stop(context.Background(), &runtimev0.StopRequest{}); err != nil {
+	if _, err = rt.Stop(context.Background(), &runtimev1.StopRequest{}); err != nil {
 		t.Fatalf("releasing Stop: %v", err)
 	}
 	requireProcessGone(t, pid)
@@ -319,11 +319,11 @@ func TestRuntimeConcurrentStopAndDestroyReleaseOnce(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	stopState := make(chan runtimev0.StopStatus_Status, 1)
-	destroyState := make(chan runtimev0.DestroyStatus_Status, 1)
+	stopState := make(chan runtimev1.StopStatus_Status, 1)
+	destroyState := make(chan runtimev1.DestroyStatus_Status, 1)
 	go func() {
 		defer wg.Done()
-		resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+		resp, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 		if err != nil {
 			t.Error("Stop:", err)
 			return
@@ -332,7 +332,7 @@ func TestRuntimeConcurrentStopAndDestroyReleaseOnce(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		resp, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		resp, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 		if err != nil {
 			t.Error("Destroy:", err)
 			return
@@ -341,10 +341,10 @@ func TestRuntimeConcurrentStopAndDestroyReleaseOnce(t *testing.T) {
 	}()
 	wg.Wait()
 
-	if state := <-stopState; state != runtimev0.StopStatus_SUCCESS {
+	if state := <-stopState; state != runtimev1.StopStatus_SUCCESS {
 		t.Errorf("Stop status = %v", state)
 	}
-	if state := <-destroyState; state != runtimev0.DestroyStatus_SUCCESS {
+	if state := <-destroyState; state != runtimev1.DestroyStatus_SUCCESS {
 		t.Errorf("Destroy status = %v", state)
 	}
 	requireProcessGone(t, pid)
@@ -365,13 +365,13 @@ func TestRuntimeInitKeepsAWorkingRedisWhenTheRequestIsInvalid(t *testing.T) {
 
 	// No network mappings: Init cannot resolve an endpoint, so it never reaches
 	// the point of building anything.
-	resp, err := rt.Init(context.Background(), &runtimev0.InitRequest{
+	resp, err := rt.Init(context.Background(), &runtimev1.InitRequest{
 		RuntimeContext: resources.NewRuntimeContextNix(),
 	})
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.InitStatus_ERROR {
+	if state := resp.GetStatus().GetState(); state != runtimev1.InitStatus_ERROR {
 		t.Fatalf("Init status = %v, want ERROR", state)
 	}
 	if !processAlive(pid) {
@@ -384,7 +384,7 @@ func TestRuntimeInitKeepsAWorkingRedisWhenTheRequestIsInvalid(t *testing.T) {
 
 	// Ownership survived, so the server is still reachable — prove it rather
 	// than leaking it.
-	if _, err = rt.Stop(context.Background(), &runtimev0.StopRequest{}); err != nil {
+	if _, err = rt.Stop(context.Background(), &runtimev1.StopRequest{}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	requireProcessGone(t, pid)
@@ -399,11 +399,11 @@ func TestRuntimeDestroyReleasesRedisEvenWhenKeepRunningIsSet(t *testing.T) {
 	pid := ownedPID(t, n)
 	rt.Settings.KeepRunning = true
 
-	resp, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	resp, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if state := resp.GetStatus().GetState(); state != runtimev0.DestroyStatus_SUCCESS {
+	if state := resp.GetStatus().GetState(); state != runtimev1.DestroyStatus_SUCCESS {
 		t.Fatalf("Destroy status = %v (%s)", state, resp.GetStatus().GetMessage())
 	}
 	requireProcessGone(t, pid)

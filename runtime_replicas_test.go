@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	cacheiface "github.com/codefly-dev/interface-cache/go/cache"
 )
 
@@ -95,8 +95,8 @@ func testRuntimeReplicas(t *testing.T, backend redisBackend, replicas int, passw
 
 	// Destroy releases every process of the set, not just the primary.
 	addresses := append([]string{r.address(t, r.write)}, r.rt.replicaAddresses...)
-	destroyed, err := r.rt.Destroy(ctx, &runtimev0.DestroyRequest{})
-	if err != nil || destroyed.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+	destroyed, err := r.rt.Destroy(ctx, &runtimev1.DestroyRequest{})
+	if err != nil || destroyed.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS {
 		t.Fatalf("Destroy: %v, %v", destroyed, err)
 	}
 	for _, address := range addresses {

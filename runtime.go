@@ -9,13 +9,13 @@ import (
 	"strings"
 	"sync"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/runners/runstate"
 	"github.com/codefly-dev/core/wool"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
 	"google.golang.org/protobuf/proto"
@@ -135,13 +135,13 @@ func (s *Runtime) initializeDockerRuntime(ctx context.Context, runner redisDocke
 	return runner.Init(ctx)
 }
 
-func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
+func (s *Runtime) Load(ctx context.Context, req *runtimev1.LoadRequest) (*runtimev1.LoadResponse, error) {
 	defer s.Wool.Catch()
 
 	return s.Runtime.LoadService(ctx, req, services.RuntimeLoad{
 		Settings:     s.Settings,
 		Requirements: requirements,
-		ResolveEndpoints: func(ctx context.Context, endpoints []*basev0.Endpoint) error {
+		ResolveEndpoints: func(ctx context.Context, endpoints []*basev1.Endpoint) error {
 			s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(endpoints)))
 			if err := s.resolveTCPEndpoints(ctx, endpoints); err != nil {
 				return s.Wool.Wrapf(err, "cannot find TCP endpoint")
@@ -151,7 +151,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	})
 }
 
-func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
+func (s *Runtime) Init(ctx context.Context, req *runtimev1.InitRequest) (*runtimev1.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -167,7 +167,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if replicas > 0 && s.ReadEndpoint == nil {
 		return s.Runtime.InitError(w.NewError("with-read-replicas is set but no endpoint was resolved for the replicas"))
 	}
-	var replicaEndpoint *basev0.Endpoint
+	var replicaEndpoint *basev1.Endpoint
 	if replicas > 0 {
 		replicaEndpoint = s.ReadEndpoint
 	}
@@ -344,7 +344,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 // redisRuntimeMappings folds every declared TCP alias onto the process that
 // serves it: the serving endpoint's own views, or, when replicas is set, the
 // serving endpoint for itself and replicas' views for every other alias.
-func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping, serving *basev0.Endpoint, replicas *basev0.Endpoint) ([]*basev0.NetworkMapping, error) {
+func redisRuntimeMappings(ctx context.Context, proposed []*basev1.NetworkMapping, serving *basev1.Endpoint, replicas *basev1.Endpoint) ([]*basev1.NetworkMapping, error) {
 	views, err := redisAccessViews(ctx, proposed, serving, "serving")
 	if err != nil {
 		return nil, err
@@ -358,12 +358,12 @@ func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping
 			return nil, err
 		}
 	}
-	accepted := make([]*basev0.NetworkMapping, 0, len(proposed))
+	accepted := make([]*basev1.NetworkMapping, 0, len(proposed))
 	for _, mapping := range proposed {
 		if mapping.GetEndpoint() == nil {
 			return nil, fmt.Errorf("redis network mapping is missing its endpoint")
 		}
-		copy := proto.Clone(mapping).(*basev0.NetworkMapping)
+		copy := proto.Clone(mapping).(*basev1.NetworkMapping)
 		if mapping.GetEndpoint().GetApi() == "tcp" {
 			if mapping.Endpoint.Module != serving.Module || mapping.Endpoint.Service != serving.Service {
 				return nil, fmt.Errorf("redis TCP alias belongs to another service")
@@ -381,7 +381,7 @@ func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping
 				if access == "" || actual == nil {
 					return nil, fmt.Errorf("serving Redis endpoint has no matching access view for %s", mapping.GetEndpoint().GetName())
 				}
-				copy.Instances[i] = proto.Clone(actual).(*basev0.NetworkInstance)
+				copy.Instances[i] = proto.Clone(actual).(*basev1.NetworkInstance)
 			}
 		}
 		accepted = append(accepted, copy)
@@ -390,7 +390,7 @@ func redisRuntimeMappings(ctx context.Context, proposed []*basev0.NetworkMapping
 }
 
 // redisAccessViews indexes the proposed mapping of endpoint by access kind.
-func redisAccessViews(ctx context.Context, proposed []*basev0.NetworkMapping, endpoint *basev0.Endpoint, role string) (map[string]*basev0.NetworkInstance, error) {
+func redisAccessViews(ctx context.Context, proposed []*basev1.NetworkMapping, endpoint *basev1.Endpoint, role string) (map[string]*basev1.NetworkInstance, error) {
 	mapping, err := resources.FindNetworkMapping(ctx, proposed, endpoint)
 	if err != nil {
 		return nil, err
@@ -398,7 +398,7 @@ func redisAccessViews(ctx context.Context, proposed []*basev0.NetworkMapping, en
 	if mapping == nil {
 		return nil, fmt.Errorf("%s Redis network mapping is missing", role)
 	}
-	views := make(map[string]*basev0.NetworkInstance)
+	views := make(map[string]*basev1.NetworkInstance)
 	for _, instance := range mapping.GetInstances() {
 		access := instance.GetAccess().GetKind()
 		if access == "" || views[access] != nil {
@@ -506,7 +506,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	return nil
 }
 
-func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
+func (s *Runtime) Start(ctx context.Context, req *runtimev1.StartRequest) (*runtimev1.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -565,7 +565,7 @@ func (s *Runtime) superviseNative(nixr *nixRedis) {
 // keeps its container running across Stop as it always has; moving it onto the
 // same release contract is a separate policy change, not part of owning the
 // native process.
-func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
+func (s *Runtime) Stop(ctx context.Context, req *runtimev1.StopRequest) (*runtimev1.StopResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -590,7 +590,7 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	return s.Runtime.StopResponse()
 }
 
-func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
+func (s *Runtime) Destroy(ctx context.Context, req *runtimev1.DestroyRequest) (*runtimev1.DestroyResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -626,7 +626,7 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	return s.Runtime.DestroyResponse()
 }
 
-func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
+func (s *Runtime) Test(ctx context.Context, req *runtimev1.TestRequest) (*runtimev1.TestResponse, error) {
 	// A RUN-LEVEL verdict, stated. This agent ships no tests of its own -- it
 	// runs a datastore -- so the honest run is zero tests and zero failures,
 	// which is what the status-only answer always meant. It has to be said:
@@ -637,8 +637,8 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 	if err != nil {
 		return nil, err
 	}
-	response.Result = &runtimev0.TestRunResult{
-		State:   runtimev0.TestRunResult_PASSED,
+	response.Result = &runtimev1.TestRunResult{
+		State:   runtimev1.TestRunResult_PASSED,
 		Message: "this agent ships no tests of its own: zero run, zero failed",
 	}
 	return response, nil

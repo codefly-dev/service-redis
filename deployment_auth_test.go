@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	goredis "github.com/redis/go-redis/v9"
 	"gopkg.in/yaml.v3"
 )
@@ -38,9 +38,9 @@ func renderEphemeral(t *testing.T, password string) (renderedRedisContainer, str
 	builder.RequirePass = password != ""
 	destination := t.TempDir()
 	request := restrictedDeploymentRequest(destination, networkMappings, nil, false)
-	request.Deployment.GetKubernetes().Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
+	request.Deployment.GetKubernetes().Profile = builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
 	response, err := builder.Deploy(context.Background(), request)
-	if err != nil || response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if err != nil || response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("Deploy: %v, %v", response.GetState(), err)
 	}
 
@@ -195,14 +195,14 @@ func renderEphemeralReplicas(t *testing.T, password string) (primary, replica re
 	builder.WithReadReplicas = true
 	read := deploymentAliasMapping(builder, "read", 16001)
 	write := deploymentAliasMapping(builder, "write", 6379)
-	if err := builder.resolveTCPEndpoints(context.Background(), []*basev0.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
+	if err := builder.resolveTCPEndpoints(context.Background(), []*basev1.Endpoint{read.Endpoint, write.Endpoint}); err != nil {
 		t.Fatal(err)
 	}
 	destination := t.TempDir()
-	request := restrictedDeploymentRequest(destination, []*basev0.NetworkMapping{read, write}, nil, false)
-	request.Deployment.GetKubernetes().Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
+	request := restrictedDeploymentRequest(destination, []*basev1.NetworkMapping{read, write}, nil, false)
+	request.Deployment.GetKubernetes().Profile = builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
 	response, err := builder.Deploy(context.Background(), request)
-	if err != nil || response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if err != nil || response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("Deploy: %v, %v", response.GetState(), err)
 	}
 	sets := parseStatefulSets(t, destination)

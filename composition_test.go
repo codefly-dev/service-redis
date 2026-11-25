@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,9 +45,9 @@ func TestLoadConfigurationRequiresPasswordWhenEnabled(t *testing.T) {
 func TestRuntimeConfigurationOverridesSettingsPassword(t *testing.T) {
 	svc := NewService()
 	svc.Password = "settings-secret"
-	conf := &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+	conf := &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 		Name:                "redis",
-		ConfigurationValues: []*basev0.ConfigurationValue{{Key: "REDIS_PASSWORD", Value: "runtime-secret"}},
+		ConfigurationValues: []*basev1.ConfigurationValue{{Key: "REDIS_PASSWORD", Value: "runtime-secret"}},
 	}}}
 	if err := svc.LoadConfiguration(context.Background(), conf); err != nil {
 		t.Fatalf("LoadConfiguration: %v", err)
@@ -78,7 +78,7 @@ func TestRedisDockerCommandKeepsPasswordOutOfArgv(t *testing.T) {
 }
 
 func TestResolveServingTCPEndpointReadWriteReplicas(t *testing.T) {
-	endpoints := []*basev0.Endpoint{
+	endpoints := []*basev1.Endpoint{
 		{Name: "read", Api: "tcp"},
 		{Name: "write", Api: "tcp"},
 	}
@@ -92,7 +92,7 @@ func TestResolveServingTCPEndpointReadWriteReplicas(t *testing.T) {
 }
 
 func TestResolveServingTCPEndpointSingle(t *testing.T) {
-	endpoints := []*basev0.Endpoint{{Name: "tcp", Api: "tcp"}}
+	endpoints := []*basev1.Endpoint{{Name: "tcp", Api: "tcp"}}
 	endpoint, err := resolveServingTCPEndpoint(context.Background(), endpoints)
 	if err != nil {
 		t.Fatalf("resolveServingTCPEndpoint: %v", err)
@@ -103,7 +103,7 @@ func TestResolveServingTCPEndpointSingle(t *testing.T) {
 }
 
 func TestResolveServingTCPEndpointFallsBackToFirst(t *testing.T) {
-	endpoints := []*basev0.Endpoint{
+	endpoints := []*basev1.Endpoint{
 		{Name: "read", Api: "tcp"},
 		{Name: "replica", Api: "tcp"},
 	}

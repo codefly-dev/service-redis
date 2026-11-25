@@ -15,7 +15,7 @@ import (
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/contract"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -120,7 +120,7 @@ func TestAgentDiscoveryDeclaresHostContract(t *testing.T) {
 	defer cancel()
 	ctx = metadata.AppendToOutgoingContext(ctx, agents.AuthMetadataKey, "discovery-test")
 
-	info, err := agentv0.NewAgentClient(conn).GetAgentInformation(ctx, &agentv0.AgentInformationRequest{})
+	info, err := agentv1.NewAgentClient(conn).GetAgentInformation(ctx, &agentv1.AgentInformationRequest{})
 	if err != nil {
 		t.Fatalf("GetAgentInformation: %v\nagent stderr:\n%s", err, stderr.String())
 	}

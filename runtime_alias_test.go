@@ -11,22 +11,22 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/runners/recoveryscope"
 	"google.golang.org/protobuf/proto"
 )
 
-func proposedRedisMapping(name string, port uint16) *basev0.NetworkMapping {
+func proposedRedisMapping(name string, port uint16) *basev1.NetworkMapping {
 	native := resources.NewNetworkInstance("localhost", port)
 	native.Access = resources.NewNativeNetworkAccess()
 	container := resources.NewNetworkInstance("host.docker.internal", port)
 	container.Access = resources.NewContainerNetworkAccess()
-	return &basev0.NetworkMapping{
-		Endpoint:  &basev0.Endpoint{Name: name, Module: "module", Service: "redis", Api: "tcp"},
-		Instances: []*basev0.NetworkInstance{native, container},
+	return &basev1.NetworkMapping{
+		Endpoint:  &basev1.Endpoint{Name: name, Module: "module", Service: "redis", Api: "tcp"},
+		Instances: []*basev1.NetworkInstance{native, container},
 	}
 }
 
@@ -37,7 +37,7 @@ func TestRedisRuntimeMappingsPreserveViewsAndProposal(t *testing.T) {
 	public.Access = resources.NewPublicNetworkAccess()
 	write.Instances = append(write.Instances, public)
 	before := proto.Clone(read)
-	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint, nil)
+	accepted, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{read, write}, write.Endpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +64,10 @@ func TestRedisRuntimeMappingsPreserveViewsAndProposal(t *testing.T) {
 func TestRedisRuntimeMappingsRejectMissingAccessView(t *testing.T) {
 	read, write := proposedRedisMapping("read", 16001), proposedRedisMapping("write", 16002)
 	write.Instances = write.Instances[:1]
-	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, write.Endpoint, nil); err == nil {
+	if _, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{read, write}, write.Endpoint, nil); err == nil {
 		t.Fatal("container alias accepted without a serving container address")
 	}
-	if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read}, write.Endpoint, nil); err == nil {
+	if _, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{read}, write.Endpoint, nil); err == nil {
 		t.Fatal("missing primary mapping accepted")
 	}
 }
@@ -76,7 +76,7 @@ func TestRedisRuntimeMappingsSingleEndpointAndOtherAPI(t *testing.T) {
 	primary := proposedRedisMapping("tcp", 16001)
 	other := proposedRedisMapping("metrics", 16002)
 	other.Endpoint.Api = "http"
-	accepted, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{primary, other}, primary.Endpoint, nil)
+	accepted, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{primary, other}, primary.Endpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,13 +102,13 @@ func TestRedisRuntimeMappingsRejectMalformedAliases(t *testing.T) {
 			case "missing-access":
 				read.Instances[0].Access = nil
 			case "duplicate-primary-access":
-				write.Instances = append(write.Instances, proto.Clone(write.Instances[0]).(*basev0.NetworkInstance))
+				write.Instances = append(write.Instances, proto.Clone(write.Instances[0]).(*basev1.NetworkInstance))
 			case "no-instances":
 				read.Instances = nil
 			case "foreign-service":
 				read.Endpoint.Service = "other"
 			}
-			if _, err := redisRuntimeMappings(context.Background(), []*basev0.NetworkMapping{read, write}, serving, nil); err == nil {
+			if _, err := redisRuntimeMappings(context.Background(), []*basev1.NetworkMapping{read, write}, serving, nil); err == nil {
 				t.Fatal("malformed proposal accepted")
 			}
 		})
@@ -148,13 +148,13 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	rt := NewRuntime()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := rt.HeadlessLoad(ctx, &basev0.ServiceIdentity{
+	if err := rt.HeadlessLoad(ctx, &basev1.ServiceIdentity{
 		Workspace: fmt.Sprintf("redis-alias-%d-%d", os.Getpid(), time.Now().UnixNano()),
 		Module:    "module", Name: "redis", Version: "1.0.0",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rt.Runtime.SetEnvironment(&basev0.Environment{Name: "local"})
+	rt.Runtime.SetEnvironment(&basev1.Environment{Name: "local"})
 	rt.TcpEndpoint = write.Endpoint
 	rt.Password = "local-alias-test-password"
 	rt.RequirePass = true
@@ -162,13 +162,13 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
 		defer stop()
-		response, err := rt.Destroy(cleanup, &runtimev0.DestroyRequest{})
-		if err != nil || response.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+		response, err := rt.Destroy(cleanup, &runtimev1.DestroyRequest{})
+		if err != nil || response.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS {
 			t.Errorf("destroy owned redis: %v, %v", response, err)
 		}
 		// Repeated explicit cleanup must remain safe after the acquired ID is gone.
-		repeated, repeatErr := rt.Destroy(cleanup, &runtimev0.DestroyRequest{})
-		if repeatErr != nil || repeated.GetStatus().GetState() != runtimev0.DestroyStatus_SUCCESS {
+		repeated, repeatErr := rt.Destroy(cleanup, &runtimev1.DestroyRequest{})
+		if repeatErr != nil || repeated.GetStatus().GetState() != runtimev1.DestroyStatus_SUCCESS {
 			t.Errorf("repeat Destroy: %v, %v", repeated, repeatErr)
 		}
 		if ownedID != "" {
@@ -184,26 +184,26 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 			}
 		}
 	})
-	response, err := rt.Init(ctx, &runtimev0.InitRequest{
+	response, err := rt.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          resources.NewRuntimeContextContainer(),
-		ProposedNetworkMappings: []*basev0.NetworkMapping{read, write},
+		ProposedNetworkMappings: []*basev1.NetworkMapping{read, write},
 	})
-	if err != nil || response.GetStatus().GetState() != runtimev0.InitStatus_READY {
+	if err != nil || response.GetStatus().GetState() != runtimev1.InitStatus_READY {
 		t.Fatalf("Init: %v, %v", response, err)
 	}
 	ownedID, err = rt.runnerEnvironment.(*dockerrun.DockerEnvironment).ContainerID()
 	if err != nil || ownedID == "" {
 		t.Fatalf("acquired container identity: %q, %v", ownedID, err)
 	}
-	started, err := rt.Start(ctx, &runtimev0.StartRequest{})
-	if err != nil || started.GetStatus().GetState() != runtimev0.StartStatus_STARTED {
+	started, err := rt.Start(ctx, &runtimev1.StartRequest{})
+	if err != nil || started.GetStatus().GetState() != runtimev1.StartStatus_STARTED {
 		t.Fatalf("Start: %v, %v", started, err)
 	}
 	if len(response.GetNetworkMappings()) != 2 {
 		t.Fatal("Init did not return both endpoint mappings")
 	}
 	// Write through the write alias, then read the same value through both.
-	for i, endpoint := range []*basev0.Endpoint{write.Endpoint, read.Endpoint} {
+	for i, endpoint := range []*basev1.Endpoint{write.Endpoint, read.Endpoint} {
 		instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, response.GetNetworkMappings(), endpoint, resources.NewNativeNetworkAccess())
 		if err != nil {
 			t.Fatal(err)
@@ -238,8 +238,8 @@ func TestRealRedisRuntimeReadWriteEndpoints(t *testing.T) {
 	if read.Instances[0].GetPort() != uint32(ports[0]) {
 		t.Fatal("Init changed the caller's proposal")
 	}
-	stopped, err := rt.Stop(ctx, &runtimev0.StopRequest{})
-	if err != nil || stopped.GetStatus().GetState() != runtimev0.StopStatus_SUCCESS {
+	stopped, err := rt.Stop(ctx, &runtimev1.StopRequest{})
+	if err != nil || stopped.GetStatus().GetState() != runtimev1.StopStatus_SUCCESS {
 		t.Fatalf("Stop: %v, %v", stopped, err)
 	}
 	retained, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", ownedID).Output()

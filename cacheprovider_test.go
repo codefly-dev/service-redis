@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	cacheiface "github.com/codefly-dev/interface-cache/go/cache"
 	"github.com/codefly-dev/interface-cache/go/cache/cachetest"
@@ -31,7 +31,7 @@ import (
 // emitted reads a configuration the agent produced, the way the SDK reads what
 // codefly delivered to a consumer. Whether a key is secret is part of the
 // interface, so reading a secret as plain configuration (or the reverse) fails.
-type emitted struct{ conf *basev0.Configuration }
+type emitted struct{ conf *basev1.Configuration }
 
 func (e emitted) Configuration(group, key string) (string, error) { return e.value(group, key, false) }
 func (e emitted) Secret(group, key string) (string, error)        { return e.value(group, key, true) }
@@ -56,7 +56,7 @@ func (e emitted) value(group, key string, secret bool) (string, error) {
 
 // connectionConfiguration is what the agent hands consumers for a redis at
 // address guarded by password.
-func connectionConfiguration(t *testing.T, address, password string) *basev0.Configuration {
+func connectionConfiguration(t *testing.T, address, password string) *basev1.Configuration {
 	t.Helper()
 	builder, _ := newDeploymentTestBuilder(t)
 	builder.Password = password

@@ -10,8 +10,8 @@ import (
 
 	"github.com/codefly-dev/core/agents/services"
 	agenttesting "github.com/codefly-dev/core/agents/testing"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"gopkg.in/yaml.v3"
 
@@ -48,7 +48,7 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
 		destination,
 		networkMappings,
-		map[string]*builderv0.KubernetesSecretKeyReference{
+		map[string]*builderv1.KubernetesSecretKeyReference{
 			passwordEnvironmentKey: {
 				Name: "redis-credentials",
 				Key:  "password",
@@ -63,21 +63,21 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
 	}
 
 	output := response.GetDeployment().GetKubernetes()
-	if output.GetProfile() != builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1 {
+	if output.GetProfile() != builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1 {
 		t.Fatalf("output profile = %s", output.GetProfile())
 	}
 	if output.GetContractVersion() != services.KubernetesManifestContractVersion {
 		t.Fatalf("contract version = %q", output.GetContractVersion())
 	}
-	if output.GetValidation().GetStaticValidation() != builderv0.KubernetesManifestValidation_STATUS_PASSED {
+	if output.GetValidation().GetStaticValidation() != builderv1.KubernetesManifestValidation_STATUS_PASSED {
 		t.Fatalf("static validation failed: %v", output.GetValidation().GetViolations())
 	}
-	if output.GetValidation().GetServerSideValidation() != builderv0.KubernetesManifestValidation_STATUS_PASSED {
+	if output.GetValidation().GetServerSideValidation() != builderv1.KubernetesManifestValidation_STATUS_PASSED {
 		t.Fatalf("server-side validation failed: %v", output.GetValidation().GetViolations())
 	}
 
@@ -103,7 +103,7 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 	}
 	// The cache group names its driver in the clear and carries the same
 	// value-free connection reference.
-	cacheValues := map[string]*basev0.ConfigurationValue{}
+	cacheValues := map[string]*basev1.ConfigurationValue{}
 	for _, v := range infos[1].GetConfigurationValues() {
 		cacheValues[v.GetKey()] = v
 	}
@@ -156,7 +156,7 @@ func TestRestrictedPortableDeploymentConfiguresAuthenticationAndReturnsConnectio
 func TestRestrictedPortableRequirePassRejectsUnusablePasswordReference(t *testing.T) {
 	tests := []struct {
 		name       string
-		references func(*Builder) map[string]*builderv0.KubernetesSecretKeyReference
+		references func(*Builder) map[string]*builderv1.KubernetesSecretKeyReference
 		message    string
 	}{
 		{
@@ -165,9 +165,9 @@ func TestRestrictedPortableRequirePassRejectsUnusablePasswordReference(t *testin
 		},
 		{
 			name: "optional",
-			references: func(builder *Builder) map[string]*builderv0.KubernetesSecretKeyReference {
+			references: func(builder *Builder) map[string]*builderv1.KubernetesSecretKeyReference {
 				key := resources.ServiceSecretConfigurationKeyFromUnique(builder.Unique(), "redis", "REDIS_PASSWORD")
-				return map[string]*builderv0.KubernetesSecretKeyReference{
+				return map[string]*builderv1.KubernetesSecretKeyReference{
 					key: {
 						Name:     "redis-credentials",
 						Key:      "password",
@@ -183,7 +183,7 @@ func TestRestrictedPortableRequirePassRejectsUnusablePasswordReference(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			builder, networkMappings := newDeploymentTestBuilder(t)
 			builder.RequirePass = true
-			var references map[string]*builderv0.KubernetesSecretKeyReference
+			var references map[string]*builderv1.KubernetesSecretKeyReference
 			if test.references != nil {
 				references = test.references(builder)
 			}
@@ -197,7 +197,7 @@ func TestRestrictedPortableRequirePassRejectsUnusablePasswordReference(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if response.GetState().GetState() != builderv0.DeploymentStatus_ERROR {
+			if response.GetState().GetState() != builderv1.DeploymentStatus_ERROR {
 				t.Fatalf("deployment status = %s, want ERROR", response.GetState().GetState())
 			}
 			if !strings.Contains(response.GetState().GetMessage(), test.message) {
@@ -221,14 +221,14 @@ func TestDeployedAliasPortsArePublishedByTheService(t *testing.T) {
 	read := deploymentAliasMapping(builder, "read", 16001)
 	write := deploymentAliasMapping(builder, "write", 16002)
 	builder.TcpEndpoint = write.Endpoint
-	networkMappings := []*basev0.NetworkMapping{read, write}
+	networkMappings := []*basev1.NetworkMapping{read, write}
 	destination := t.TempDir()
 
 	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(destination, networkMappings, nil, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
 	}
 
@@ -271,7 +271,7 @@ func TestSingleEndpointDeploymentRendersUnchangedService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
 	}
 
@@ -312,11 +312,11 @@ func TestServicePortNamesStayValidForAnyEndpointName(t *testing.T) {
 	destination := t.TempDir()
 
 	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
-		destination, []*basev0.NetworkMapping{long, underscored}, nil, false))
+		destination, []*basev1.NetworkMapping{long, underscored}, nil, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
 	}
 
@@ -347,16 +347,16 @@ func TestExternalTCPEndpointIsNotPublishedByTheService(t *testing.T) {
 	read.Endpoint.Exposure = resources.ExposureNone
 	external := resources.NewNetworkInstance("redis.example.com", 6379)
 	external.Access = resources.NewPublicNetworkAccess()
-	read.Instances = []*basev0.NetworkInstance{external}
+	read.Instances = []*basev1.NetworkInstance{external}
 	builder.TcpEndpoint = write.Endpoint
 	destination := t.TempDir()
 
 	response, err := builder.Deploy(context.Background(), restrictedDeploymentRequest(
-		destination, []*basev0.NetworkMapping{read, write}, nil, false))
+		destination, []*basev1.NetworkMapping{read, write}, nil, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+	if response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS {
 		t.Fatalf("external alias broke the deployment: %s", response.GetState().GetMessage())
 	}
 
@@ -415,25 +415,25 @@ func parseRenderedService(t *testing.T, destination string) renderedService {
 	return service
 }
 
-func deploymentAliasMapping(builder *Builder, name string, port uint16) *basev0.NetworkMapping {
+func deploymentAliasMapping(builder *Builder, name string, port uint16) *basev1.NetworkMapping {
 	instance := resources.NewNetworkInstance("redis.codefly-test.svc.cluster.local", port)
 	instance.Access = resources.NewContainerNetworkAccess()
-	return &basev0.NetworkMapping{
-		Endpoint: &basev0.Endpoint{
+	return &basev1.NetworkMapping{
+		Endpoint: &basev1.Endpoint{
 			Name:    name,
 			Module:  builder.Identity.Module,
 			Service: builder.Identity.Name,
 			Api:     "tcp",
 		},
-		Instances: []*basev0.NetworkInstance{instance},
+		Instances: []*basev1.NetworkInstance{instance},
 	}
 }
 
-func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping) {
+func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev1.NetworkMapping) {
 	t.Helper()
 	ctx := context.Background()
 	builder := NewBuilder()
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Workspace: "workspace",
 		Module:    "module",
 		Name:      "redis",
@@ -447,7 +447,7 @@ func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping)
 		Module:  resources.ToModuleWithCase(builder.Identity),
 	}
 	builder.EnvironmentVariables.SetIdentity(identity)
-	builder.TcpEndpoint = &basev0.Endpoint{
+	builder.TcpEndpoint = &basev1.Endpoint{
 		Name:    "tcp",
 		Module:  identity.Module,
 		Service: identity.Name,
@@ -455,26 +455,26 @@ func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping)
 	}
 	instance := resources.NewNetworkInstance("redis.example.com", 6379)
 	instance.Access = resources.NewContainerNetworkAccess()
-	return builder, []*basev0.NetworkMapping{{
+	return builder, []*basev1.NetworkMapping{{
 		Endpoint:  builder.TcpEndpoint,
-		Instances: []*basev0.NetworkInstance{instance},
+		Instances: []*basev1.NetworkInstance{instance},
 	}}
 }
 
 func restrictedDeploymentRequest(
 	destination string,
-	networkMappings []*basev0.NetworkMapping,
-	secretReferences map[string]*builderv0.KubernetesSecretKeyReference,
+	networkMappings []*basev1.NetworkMapping,
+	secretReferences map[string]*builderv1.KubernetesSecretKeyReference,
 	validateServerSide bool,
-) *builderv0.DeploymentRequest {
-	return &builderv0.DeploymentRequest{
-		Environment:     &basev0.Environment{Name: "test"},
+) *builderv1.DeploymentRequest {
+	return &builderv1.DeploymentRequest{
+		Environment:     &basev1.Environment{Name: "test"},
 		NetworkMappings: networkMappings,
-		Deployment: &builderv0.Deployment{Kind: &builderv0.Deployment_Kubernetes{
-			Kubernetes: &builderv0.KubernetesDeployment{
+		Deployment: &builderv1.Deployment{Kind: &builderv1.Deployment_Kubernetes{
+			Kubernetes: &builderv1.KubernetesDeployment{
 				Namespace:            "codefly-test",
 				Destination:          destination,
-				Profile:              builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1,
+				Profile:              builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1,
 				SecretReferences:     secretReferences,
 				ValidateServerSide:   validateServerSide,
 				ValidationKubeconfig: "/tmp/codefly-test-kubeconfig",
@@ -522,16 +522,16 @@ func readManifestTree(t *testing.T, root string) string {
 	return manifests.String()
 }
 
-func assertRestrictedManifestBundle(t *testing.T, output *builderv0.KubernetesDeploymentOutput, passwordKey string) {
+func assertRestrictedManifestBundle(t *testing.T, output *builderv1.KubernetesDeploymentOutput, passwordKey string) {
 	t.Helper()
 	bundle := output.GetBundle()
 	if bundle == nil {
 		t.Fatal("restricted output carries no manifest bundle")
 	}
-	if bundle.GetFormat() != builderv0.KubernetesDeploymentOutput_KUSTOMIZE {
+	if bundle.GetFormat() != builderv1.KubernetesDeploymentOutput_KUSTOMIZE {
 		t.Errorf("bundle format = %s", bundle.GetFormat())
 	}
-	if bundle.GetProfile() != builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1 {
+	if bundle.GetProfile() != builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1 {
 		t.Errorf("bundle profile = %s", bundle.GetProfile())
 	}
 	if bundle.GetContractVersion() != services.KubernetesManifestContractVersion {
@@ -551,7 +551,7 @@ func assertRestrictedManifestBundle(t *testing.T, output *builderv0.KubernetesDe
 			t.Errorf("bundle inventory entry = %+v, want path and sha256 digest", file)
 		}
 	}
-	if bundle.GetValidation().GetStaticValidation() != builderv0.KubernetesManifestValidation_STATUS_PASSED {
+	if bundle.GetValidation().GetStaticValidation() != builderv1.KubernetesManifestValidation_STATUS_PASSED {
 		t.Errorf("bundle validation not passed: %v", bundle.GetValidation().GetViolations())
 	}
 	reference := bundle.GetSecretReferences()[passwordKey]

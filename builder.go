@@ -6,14 +6,14 @@ import (
 	"fmt"
 
 	"github.com/codefly-dev/core/agents/communicate"
-	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/agents/services/upgrade"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 )
 
 // runtimeImageRole is the role every image this service owns plays; redis ships
@@ -26,7 +26,7 @@ type Builder struct {
 }
 
 type deploymentTemplateParameters struct {
-	PasswordReference *builderv0.KubernetesSecretKeyReference
+	PasswordReference *builderv1.KubernetesSecretKeyReference
 	ServicePorts      []servicePort
 	Headless          bool
 	// Replicas is the number of read replicas rendered beside the primary, 0
@@ -60,8 +60,8 @@ type servicePort struct {
 // Without this answer core refuses the whole render of any environment that
 // mirrors a registry, because such an environment builds on a dedicated
 // builder and core verifies every agent before dispatching to it.
-func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
-	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
+func (s *Builder) BuildCapabilities(context.Context, *builderv1.BuildCapabilitiesRequest) (*builderv1.BuildCapabilitiesResponse, error) {
+	return &builderv1.BuildCapabilitiesResponse{BuildxSelection: true}, nil
 }
 
 func NewBuilder() *Builder {
@@ -72,7 +72,7 @@ func NewBuilder() *Builder {
 	}
 }
 
-func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
+func (s *Builder) Load(ctx context.Context, req *builderv1.LoadRequest) (*builderv1.LoadResponse, error) {
 	defer s.Wool.Catch()
 
 	return s.Builder.LoadService(ctx, req, services.BuilderLoad{
@@ -90,7 +90,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 }
 
 // Audit scans the redis docker image for HIGH/CRITICAL CVEs via trivy.
-func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*builderv0.AuditResponse, error) {
+func (s *Builder) Audit(ctx context.Context, req *builderv1.AuditRequest) (*builderv1.AuditResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	return s.Builder.AuditContainer(ctx, req, image.FullName())
@@ -100,10 +100,10 @@ func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*buil
 // under image scope. Redis selects its runtime image instead of building one,
 // so the reference is known without a build and the agent can enumerate its own
 // subjects when the caller supplies none.
-func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+func (s *Builder) SBOM(ctx context.Context, req *builderv1.SBOMRequest) (*builderv1.SBOMResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if req.GetScope() != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		return s.Builder.SBOMContainer(ctx, image.FullName())
 	}
 	subjects := req.GetSubjects()
@@ -124,10 +124,10 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 // unset because the pinned reference addresses a manifest index: the scanner
 // resolves each platform to its own child manifest and binds evidence to that
 // child digest, which never equals the index digest a subject could carry.
-func (s *Builder) runtimeImageSubjects() []*builderv0.ImageSubject {
-	subjects := make([]*builderv0.ImageSubject, 0, len(runtimeImage.Platforms))
+func (s *Builder) runtimeImageSubjects() []*builderv1.ImageSubject {
+	subjects := make([]*builderv1.ImageSubject, 0, len(runtimeImage.Platforms))
 	for _, platform := range runtimeImage.Platforms {
-		subjects = append(subjects, &builderv0.ImageSubject{
+		subjects = append(subjects, &builderv1.ImageSubject{
 			Reference: image.FullName(),
 			Platform:  platform,
 			Role:      runtimeImageRole,
@@ -138,7 +138,7 @@ func (s *Builder) runtimeImageSubjects() []*builderv0.ImageSubject {
 }
 
 // Upgrade reports a newer redis tag (within current major unless --major).
-func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*builderv0.UpgradeResponse, error) {
+func (s *Builder) Upgrade(ctx context.Context, req *builderv1.UpgradeRequest) (*builderv1.UpgradeResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	res, err := upgrade.Docker(ctx, image.FullName(), upgrade.Options{
@@ -151,7 +151,7 @@ func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*
 	return s.Builder.UpgradeResponse(res.Changes, res.LockfileDiff)
 }
 
-func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
+func (s *Builder) Deploy(ctx context.Context, req *builderv1.DeploymentRequest) (*builderv1.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 	s.Base.SetDockerImage(image)
 
@@ -175,7 +175,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		},
 	})
 	if err != nil ||
-		response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS ||
+		response.GetState().GetState() != builderv1.DeploymentStatus_SUCCESS ||
 		restrictedConfiguration == nil {
 		return response, err
 	}
@@ -307,7 +307,7 @@ func (s *Builder) servicePorts(ctx context.Context, mappings []*v0.NetworkMappin
 	return ports, nil
 }
 
-func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
+func (s *Builder) Create(ctx context.Context, req *builderv1.CreateRequest) (*builderv1.CreateResponse, error) {
 	defer s.Wool.Catch()
 
 	err := s.Templates(ctx, s.Information, services.WithFactory(factoryFS))
@@ -332,7 +332,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 // as unrestricted is the unsafe direction -- it would hand a restricted render
 // the secrets it exists to refuse. A profile this build cannot name is treated
 // as restricted for that reason.
-func restrictedOutput(profile builderv0.KubernetesOutputProfile) bool {
+func restrictedOutput(profile builderv1.KubernetesOutputProfile) bool {
 	parsed, err := services.ParseOutputProfile(profile)
 	if err != nil {
 		return true
@@ -359,7 +359,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	return nil
 }
 
-func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error {
+func (s *Builder) Communicate(stream builderv1.Builder_CommunicateServer) error {
 	asker := communicate.NewQuestionAsker(stream)
 	_, err := asker.RunSequence(nil)
 	return err
