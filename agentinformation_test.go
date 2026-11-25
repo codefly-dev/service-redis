@@ -28,7 +28,7 @@ import (
 // protocol moved, so the published CLI has to be confirmed to have moved too.
 const (
 	hostProtocolVersion        = 1
-	hostStartupProtocolVersion = 2
+	hostStartupProtocolVersion = 1
 	hostRecoveryCapability     = "container-recovery-scope/v1"
 )
 
