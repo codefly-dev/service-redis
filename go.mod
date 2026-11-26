@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-redis
 go 1.27.4
 
 require (
-	github.com/codefly-dev/core v0.19.38-0.20261125210302-a1a14e19a554
+	github.com/codefly-dev/core v0.19.38-0.20261126202006-b858e99a7bad
 	github.com/codefly-dev/gortk v0.2.0
 	github.com/codefly-dev/interface-cache/go/cache v0.4.1
 	github.com/codefly-dev/service-redis/cache v0.3.0
